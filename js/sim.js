@@ -22,12 +22,16 @@ const F=S.F={lv:Array.from({length:8},()=>new Float32Array(N)),p:new Float32Arra
  q2:new Float32Array(N),sst0:new Float32Array(N),sa:new Float32Array(N),el:null};
 F.u=F.lv[0];F.v=F.lv[1];
 const NAMES=['Haishen','Noul','Dolphin','Kujira','Chan-hom','Linfa','Nangka','Saudel','Molave','Goni','Vamco','Krovanh','Dujuan','Surigae','Choi-wan','Koguma','Champi','In-fa','Cempaka','Nepartak','Lupit','Mirinae','Nida','Omais','Conson','Chanthu','Dianmu','Mindulle','Lionrock','Kompasu'];
+// Genesis starts as an unnamed invest (JTWC-style 90W..99W numbering); a real name is only assigned once the
+// system actually reaches tropical-storm strength (34 kt), same as real operational practice.
+let investN=90,nameSeq=0;
+function nameStorm(s){s.name=NAMES[nameSeq%NAMES.length];nameSeq++;s.named=true}
 const GS=.25/D,RR=Math.round(6*GS),SC=16*GS*GS;   // grid-resolution scale factors (tuned at 0.25 deg)
 const TH=[34,48,64,85,105],catOf=k=>{let c=0;while(c<5&&k>=TH[c])c++;return c};
 // intensity-change node with +-2 kt hysteresis so a storm hovering on a threshold doesn't spam nodes
-function catEv(s){const k=s.v*1.944;s.ev=s.ev||[];if(s.cat==null){s.cat=catOf(k);return}let c=s.cat;
+function catEv(s){const k=s.v*1.944;s.ev=s.ev||[];if(s.cat==null){s.cat=catOf(k);if(s.cat>=1&&!s.named)nameStorm(s);return}let c=s.cat;
   while(c<5&&k>=TH[c]+2)c++;while(c>0&&k<TH[c-1]-2)c--;
-  if(c!==s.cat){s.ev.push({t:'i',lon:s.lon,lat:s.lat,c,up:c>s.cat,h:S.t});s.cat=c}}
+  if(c!==s.cat){if(c>=1&&!s.named)nameStorm(s);s.ev.push({t:'i',lon:s.lon,lat:s.lat,c,up:c>s.cat,h:S.t});s.cat=c}}
 const pOf=v=>1010-Math.pow(v*1.944/6.7,1/.644);
 const cellIdx=S.cellIdx=(lon,lat)=>{const i=Math.floor((lon-C.lon0)/D),j=Math.floor((C.lat1-lat)/D);return i<0||j<0||i>=GW||j>=GH?-1:j*GW+i};
 
@@ -36,9 +40,15 @@ const doyOf=t=>{const d=new Date(S.t0+t*36e5);return(d-Date.UTC(d.getUTCFullYear
 const seas=t=>.5+.5*Math.cos(2*Math.PI*(doyOf(t)-205)/365);            // 0 = winter, 1 = late-July peak
 const clim=(sn,en=0)=>({rx:150-10*sn+5*en,ry:19+11*sn,ra:1.12-.14*sn-.08*en,jl:30+8*sn,mtx:132,mty:6+7*sn});
 const act=()=>{const d=doyOf(S.t),x=Math.min(Math.abs(d-240),365-Math.abs(d-240));return .05+.95*Math.exp(-((x/65)**2))};
-function setSST(sn){const lc=6+6*sn,b=29.1+1.1*sn,k=.0125-.005*sn;
-  for(let j=0;j<GH;j++){const dl=C.lat1-(j+.5)*D-lc,base=b-k*dl*dl;
-    for(let i=0;i<GW;i++)F.sst0[j*GW+i]=base-(C.lon0+(i+.5)*D<122?.8:0)}}
+function setSST(sn){const useReal=hindOn()&&TS.hindSST,lc=6+6*sn,b=29.1+1.1*sn,k=.0125-.005*sn,en=S.E.enso;
+  for(let j=0;j<GH;j++){const lat=C.lat1-(j+.5)*D,dl=lat-lc,base=b-k*dl*dl;
+    for(let i=0;i<GW;i++){const lon=C.lon0+(i+.5)*D,idx=j*GW+i;
+      if(useReal){const r=realSST(lon,lat);F.sst0[idx]=r!=null?r:base}
+      else{ // analytic fallback: ENSO shifts the warm pool - El Nino relaxes/spreads it east with a weaker
+            // cold tongue; La Nina compresses it west of ~150E with a cooler equatorial tongue further east
+        const east=clamp((lon-150)/25,-1,1),tongue=clamp(1-Math.abs(lat)/4,0,1)*(.6-.35*en),
+          scs=.8*clamp((124-lon)/6,0,1);   // South China Sea slightly cooler than open Pacific - smooth ramp, not a hard step, so it never shows as a line
+        F.sst0[idx]=base-scs+en*.7*east-tongue}}}}
 
 // ---------------- background = climatological mean + barotropic anomaly dynamics ----------------
 const LV=new Float64Array(8),CA=Math.cos(20*R),CS=Math.sin(20*R),AE=6.371e6,OM=7.292e-5,A2H=(AE*R)**2,LF=[.75,1,1.15];let bp=0;
@@ -60,6 +70,8 @@ TS.loadHind=async(bu,ju)=>{try{const[a,b]=await Promise.all([fetch(bu,{cache:'no
   const j=await b.json(),d=new Int16Array(await a.arrayBuffer()),want=j.days*6*NC;
   if(d.length!==want){console.warn('loadHind: size mismatch, hind.bin has',d.length,'ints, hind.json says days=',j.days,'-> expected',want,'(regenerate both together with tools/make_hindcast.py)');return false}
   TS.hind={...j,t0:Date.parse(j.start+'T00:00:00Z'),data:d};return true}catch(e){console.warn('loadHind: error',e);return false}};   // js/hind.bin+json from tools/make_hindcast.py
+TS.loadHindSST=async url=>{try{const r=await fetch(url,{cache:'no-store'});if(!r.ok){console.warn('loadHindSST: HTTP',r.status,url);return false}
+  TS.hindSST={data:new Int16Array(await r.arrayBuffer())};return true}catch(e){console.warn('loadHindSST: error',e);return false}};   // js/hind_sst.bin: real monthly-mean SST (ERSSTv5); month0/year0/n metadata lives in hind.json's "sst" field
 // Real-weather mode is only active while the simulated date lies inside the reanalysis window that was loaded. If the chosen start date
 // is outside it (e.g. a future date), or the data runs out mid-run, the sim falls back to climatology + stochastic genesis instead of
 // sitting there with genesis disabled.
@@ -76,11 +88,20 @@ function loadAna(){const H=TS.hind,x=clamp((S.t0+S.t*36e5-H.t0)/864e5-.5,0,H.day
   for(let j=1;j<CH-1;j++)for(let i=1;i<CW-1;i++){const k=j*CW+i;
     ZA[k]=(((va[k+1]-MV[1][k+1])-(va[k-1]-MV[1][k-1]))-((ua[k-CW]-MU[1][k-CW])*rc[j-1]-(ua[k+CW]-MU[1][k+CW])*rc[j+1]))/(2*R*AE*rc[j])}}
 function hindInit(){const H=TS.hind,off=(S.t0-H.t0)/36e5;for(const o of H.storms){o.done=false;o.T=o.trk.map(p=>p[0]-off)}}
+// Real SST for the exact simulated year/month (ERSSTv5 monthly means, time-interpolated), used in place of the
+// analytic climatology while hindcast free-run/replay is active. The fast storm-induced cold wake is still
+// handled separately and dynamically by F.sa, so a monthly-mean background is all this needs to provide.
+function realSST(lon,lat){const M=TS.hind&&TS.hind.sst,D=TS.hindSST&&TS.hindSST.data;if(!M||!D||!M.n)return null;
+  const d=new Date(S.t0+S.t*36e5),mIdx=(d.getUTCFullYear()-M.year0)*12+(d.getUTCMonth()-M.month0),
+    dim=new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,0)).getUTCDate(),f=(d.getUTCDate()-1+d.getUTCHours()/24)/dim,
+    i0=clamp(mIdx,0,M.n-1),i1=clamp(mIdx+1,0,M.n-1),fx=lon-C.lon0,fy=C.lat1-lat,
+    a=bil(D.subarray(i0*NC,i0*NC+NC),fx,fy)*.01,b=bil(D.subarray(i1*NC,i1*NC+NC),fx,fy)*.01;
+  return a+(b-a)*f}
 function obsAt(o,t){const T=o.T,n=T.length;if(t<T[0]||t>T[n-1])return null;let i=1;while(i<n-1&&T[i]<t)i++;
   const f=(t-T[i-1])/(T[i]-T[i-1]||1),p=o.trk[i-1],q=o.trk[i];return[p[1]+(q[1]-p[1])*f,p[2]+(q[2]-p[2])*f,p[3]+(q[3]-p[3])*f]}
 function hindSpawn(){for(const o of TS.hind.storms){if(o.done||o.T[0]>S.t||o.T[o.T.length-1]<S.t)continue;o.done=true;
   const p=obsAt(o,S.t),a=obsAt(o,S.t+6),b=a?p:obsAt(o,S.t-6),c=a||p,cl=Math.cos(p[1]*R),ok=b&&c!==b,v=Math.max(10,p[2]/1.944);
-  S.storms.push({id:++S.uid,name:o.name,lon:p[0],lat:p[1],v,pmin:pOf(v),rm:60,mu:ok?(c[0]-b[0])*111*cl/21.6:-3,mv:ok?(c[1]-b[1])*111/21.6:1,nu:0,nv:0,age:0,max:v,land:false,spd:5,sv:[0,0],obs:o,trk:[[p[0],p[1],v]],ev:[]})}}
+  S.storms.push({id:++S.uid,name:o.name,named:true,lon:p[0],lat:p[1],v,pmin:pOf(v),rm:60,mu:ok?(c[0]-b[0])*111*cl/21.6:-3,mv:ok?(c[1]-b[1])*111/21.6:1,nu:0,nv:0,age:0,max:v,land:false,spd:5,sv:[0,0],obs:o,trk:[[p[0],p[1],v]],ev:[]})}}
 // analytic climatology (fallback; also gives the schematic mean pressure)
 function psiM(lon,lat,o){const E=S.E,cl=Math.cos(lat*R);let a=0,b=0,c=0,g;
   for(const h of[[0,0,1],[-24,-2,.45],[22,1,.5]]){const dx=(lon-E.rx-h[0])*cl/17,dy=(lat-E.ry-h[1])/9;g=110*E.ra*h[2]*Math.exp(-(dx*dx+dy*dy));a+=.9*g;b+=1.25*g;c+=.55*g}
@@ -138,7 +159,7 @@ S.init=function(el){F.el=el;const t=new Float32Array(N),r=Math.round(3*GS),w=2*r
   for(let j=0;j<GH;j++)for(let i=0;i<GW;i++){let a=0;for(let d=-r;d<=r;d++)a+=Math.max(0,el[j*GW+clamp(i+d,0,GW-1)]);t[j*GW+i]=a/w}
   for(let j=0;j<GH;j++)for(let i=0;i<GW;i++){let a=0;for(let d=-r;d<=r;d++)a+=t[clamp(j+d,0,GH-1)*GW+i];ELS[j*GW+i]=a/w}
   S.reset()};
-S.reset=function(){S.storms=[];S.hist=[];S.t=0;S.running=false;S.hm=S.wx!=='synth'&&!!TS.hind&&S.t0>=TS.hind.t0&&S.t0<=winEnd();S.hOff=false;bgOk=false;F.sa.fill(0);ZP.fill(0);PP.fill(0);
+S.reset=function(){S.storms=[];S.hist=[];S.t=0;S.running=false;S.hm=S.wx!=='synth'&&!!TS.hind&&S.t0>=TS.hind.t0&&S.t0<=winEnd();S.hOff=false;bgOk=false;F.sa.fill(0);ZP.fill(0);PP.fill(0);investN=90;nameSeq=0;
   const sn=seas(0),en=clamp(rn()*.6,-1,1);        // en>0 El Niño (ridge retreats east, genesis shifts east), <0 La Niña
   S.E={sn,enso:en,mo:rn()*4,rx:0,ry:0,ra:1,jl:0,mtx:0,mty:0};meanField();
   if(hindOn()){hindInit();loadAna();ZP.set(ZA)}                        // start from the observed 500 hPa anomaly
@@ -164,8 +185,8 @@ S.spawn=function(near){const E=S.E,st=TS.stats;
     const sh=.8*Math.hypot(cs(6,lon,lat)-cs(2,lon,lat),cs(7,lon,lat)-cs(3,lon,lat)),
       vf=clamp(1+vort850(lon,lat)*4e4,.2,3),                            // favor spots with a live cyclonic disturbance; disfavor (but don't zero out) ridges
       w=clamp((F.sst0[k]-26.5)/1.5,0,1)*clamp(1-sh/16,0,1)*clamp((lat-5)/5,0,1)*vf*(st&&!near?1:(.25+1.6*Math.exp(-(((lon-E.mtx)/22)**2+((lat-E.mty-2)/6)**2)))*Math.exp(-(((lon-142-14*E.enso)/30)**2)));
-    if(Math.random()>=w)continue;const v=12+Math.random()*3;
-    S.storms.push({id:++S.uid,name:NAMES[(S.uid-1)%NAMES.length],lon,lat,v,pmin:pOf(v),rm:60,mu:-3+rn()*1.5,mv:1+rn(),nu:0,nv:0,age:0,max:v,land:false,spd:5,sv:[0,0],trk:[[lon,lat,v]],ev:[]});return S.storms[S.storms.length-1]}};
+    if(Math.random()>=w)continue;const v=12+Math.random()*3,inv=investN;investN=investN>=99?90:investN+1;
+    S.storms.push({id:++S.uid,name:'Invest '+inv+'W',named:false,lon,lat,v,pmin:pOf(v),rm:60,mu:-3+rn()*1.5,mv:1+rn(),nu:0,nv:0,age:0,max:v,land:false,spd:5,sv:[0,0],trk:[[lon,lat,v]],ev:[]});return S.storms[S.storms.length-1]}};
 // Fujiwhara: each storm is advected by the (depth-averaged) flow induced by the others, counter-clockwise about the neighbour (NH), plus a
 // weak inward drift at close range. Depth-averaging over the storm's own scale means the steering push is only a small fraction of the
 // neighbour's peak tangential wind, and it dies off within ~1000 km (real interaction is a 1-3 m/s effect out to ~1000 km, ~4 m/s max near 300 km).
@@ -175,6 +196,53 @@ function fuji(s){let U=0,V=0;for(const o of S.storms){if(o===s)continue;
     U+=-dy/r*vt-dx/r*vt*inw;V+=dx/r*vt-dy/r*vt*inw}}
   return[U,V]}
 S.fuji=fuji;
+// ---------------- Forecast: extrapolate the CURRENT flow forward, same physics as upd() ----------------
+// A short-range track forecast is "where does this storm go if today's steering pattern verifies" - steering + beta
+// drift + storm-storm interaction, run forward WITHOUT the hourly wobble (nu/nv), since that fine-scale turbulence is
+// unknowable ahead of time (the same simplification real steady-state/CLIPER-style guidance makes). The flow field
+// itself (CG) is held at its current snapshot rather than re-run through dyn() - a short-lead persistence assumption,
+// same one real 1-3 day steering nowcasts implicitly make. Cone radius follows the approximate SHAPE of published
+// NHC/JTWC mean track-error-by-lead-time curves (present-day skill, km).
+const CONE=[[0,0],[24,40],[48,80],[72,125],[96,175],[120,225]];
+const coneR=h=>{if(h<=0)return 0;let i=1;while(i<CONE.length-1&&CONE[i][0]<h)i++;
+  const a=CONE[i-1],b=CONE[i],t=(h-a[0])/(b[0]-a[0]||1);return a[1]+(b[1]-a[1])*t};
+function fujiF(f,set){let U=0,V=0;for(const o of set){if(o===f||o.dead)continue;
+  const dx=(f.lon-o.lon)*Math.cos(f.lat*R)*111,dy=(f.lat-o.lat)*111,r=Math.hypot(dx,dy)+1e-3;
+  if(r<1000){const x=Math.pow(o.rm/r,1.4),vt=Math.min(4,.2*o.v*Math.sqrt(x*Math.exp(1-x))*Math.exp(-((r/600)**2))),inw=r<600?.12:0;
+    U+=-dy/r*vt-dx/r*vt*inw;V+=dx/r*vt-dy/r*vt*inw}}
+  return[U,V]}
+function nbShearF(f,set){let u8=0,v8=0,u2=0,v2=0;for(const o of set){if(o===f||o.dead)continue;
+  const dx=(f.lon-o.lon)*Math.cos(f.lat*R)*111,dy=(f.lat-o.lat)*111,r=Math.hypot(dx,dy)+1e-3;if(r>1400)continue;
+  const x=Math.pow(o.rm/r,1.4),vt=o.v*Math.sqrt(x*Math.exp(1-x))*Math.exp(-((r/900)**2)),tu=-vt*dy/r,tv=vt*dx/r;
+  u8+=tu;v8+=tv;u2-=tu*.2;v2-=tv*.2}
+  return .8*Math.hypot(u2-u8,v2-v8)}
+S.forecast=function(hours){hours=hours||120;
+  const set=S.storms.map(s=>({id:s.id,name:s.name,lon:s.lon,lat:s.lat,mu:s.mu,mv:s.mv,v:s.v,rm:s.rm,dead:false,trk:[[s.lon,s.lat,s.v,0]]}));
+  for(let h=1;h<=hours;h++)for(const f of set){if(f.dead)continue;const k=cellIdx(f.lon,f.lat);if(k<0){f.dead=true;continue}
+    const el=F.el[k],land=el>0,sst=F.sst0[k]+F.sa[k],els=ELS[k],gi=k%GW;let tx=0,ty=0;
+    if(gi>0&&gi<GW-1&&k>=GW&&k<N-GW){const gx=(ELS[k+1]-ELS[k-1])/2*GS,gy=(ELS[k-GW]-ELS[k+GW])/2*GS,m=Math.hypot(gx,gy);if(m>1){const ff=Math.min(2.5,m/100)/m;tx=-gx*ff;ty=-gy*ff}}
+    const slow=1-.3*Math.min(1,els/1000)-(land?.1:0),st=steer(f.lon,f.lat,f.v),
+      betaMag=(.6+1.5*clamp(f.rm/90,0,1))*clamp(1.3-f.lat/60,.5,1.3),betaU=-betaMag*.7,betaV=betaMag*.85,
+      [fjU,fjV]=fujiF(f,set);
+    f.mu+=((st.u+betaU+fjU)*.95*slow+tx-f.mu)/13;f.mv+=((st.v+betaV+fjV)*.95*slow+ty-f.mv)/13;
+    f.lon+=f.mu*3.6/(111*Math.cos(f.lat*R));f.lat+=f.mv*3.6/111;
+    const k2=Math.max(0,cellIdx(f.lon,f.lat)),shear=st.shear+nbShearF(f,set),rel=clamp((F.q[k2]-.35)/.4,0,1),
+      mpi=12+80*clamp((sst-26)/4,0,1),tgt=mpi*clamp(1-shear/32,.12,1)*(.65+.35*rel)*clamp((f.lat-5)/8,0,1),
+      rmf=clamp(65/f.rm,.7,1.6),dv=land?-(f.v-8)*(.07+.06*Math.min(1,el/1500)):(tgt-f.v)*(tgt>f.v?.024:.032)*rmf;
+    f.v=Math.max(3,f.v+dv);f.rm+=(clamp(65-.55*f.v+(f.lat-12),20,100)-f.rm)*.03;
+    if(h%3===0)f.trk.push([f.lon,f.lat,f.v,coneR(h)]);
+    if(f.v<10&&(land||f.lat>36))f.dead=true}
+  return set.map(f=>({id:f.id,name:f.name,trk:f.trk}))};
+// Vertical shear a storm feels from a NEIGHBOUR's own circulation: the exact same Rankine profile fields() uses to
+// paint each storm's wind footprint (850 hPa cyclonic core, weak 200 hPa outflow anticyclone), evaluated at this
+// storm's centre from every other storm and read back as u200-u850. Real close-packed systems ventilate/shear each
+// other through outflow this way - this isn't a separate distance penalty, it's the model's own wind field read
+// back at a neighbour's location instead of just this storm's own.
+function nbShear(s){let u8=0,v8=0,u2=0,v2=0;for(const o of S.storms){if(o===s)continue;
+  const dx=(s.lon-o.lon)*Math.cos(s.lat*R)*111,dy=(s.lat-o.lat)*111,r=Math.hypot(dx,dy)+1e-3;if(r>1400)continue;
+  const x=Math.pow(o.rm/r,1.4),vt=o.v*Math.sqrt(x*Math.exp(1-x))*Math.exp(-((r/900)**2)),tu=-vt*dy/r,tv=vt*dx/r;
+  u8+=tu;v8+=tv;u2-=tu*.2;v2-=tv*.2}
+  return .8*Math.hypot(u2-u8,v2-v8)}
 // Merger: centres closer than ~0.9x the sum of the two RMWs (80-170 km, i.e. eyewalls essentially overlapping). Similar intensity -> complete merger (new centre = intensity-weighted, slightly stronger, larger);
 // otherwise the stronger storm absorbs the weaker one, gaining a little.
 function merge(){for(let i=0;i<S.storms.length;i++)for(let j=i+1;j<S.storms.length;j++){const a=S.storms[i],b=S.storms[j];
@@ -197,17 +265,30 @@ function upd(s){const k=cellIdx(s.lon,s.lat);if(k<0)return kill(s);
   s.nu=s.nu*.99+rn()*.22*nz;s.nv=s.nv*.99+rn()*.22*nz;
   s.mu+=((st.u+betaU+fjU)*.95*slow+tx+s.nu-s.mu)/13;s.mv+=((st.v+betaV+fjV)*.95*slow+ty+s.nv-s.mv)/13;
   s.lon+=s.mu*3.6/(111*Math.cos(s.lat*R));s.lat+=s.mv*3.6/111;
-  const shear=st.shear,rel=clamp((F.q[k]-.35)/.4,0,1),mpi=12+62*clamp((sst-26)/4,0,1),
-        tgt=mpi*(1-shear/26)*(.6+.4*rel)*clamp((s.lat-5)/8,0,1);
-  const dv=land?-(s.v-8)*(.07+.06*Math.min(1,el/1500)):(tgt-s.v)*(tgt>s.v?.02:.03);
-  s.v=Math.max(3,s.v+dv);s.max=Math.max(s.max,s.v);s.pmin=pOf(s.v);catEv(s);
+  const shear=st.shear+nbShear(s),rel=clamp((F.q[k]-.35)/.4,0,1),mpi=12+80*clamp((sst-26)/4,0,1);
+  let tgt=mpi*clamp(1-shear/32,.12,1)*(.65+.35*rel)*clamp((s.lat-5)/8,0,1);
+  // eyewall replacement cycle: a mature, near-peak storm occasionally spends ~a day reorganising its inner
+  // core, capping its target intensity a bit below MPI before it's free to re-strengthen - gives the
+  // plateau-then-wobble near peak intensity real best-tracks show, instead of a smooth climb straight to MPI.
+  if(!s.erc&&s.v>47&&s.v>s.max*.92&&Math.random()<1/260)s.erc=16+Math.random()*16;
+  if(s.erc>0){tgt*=.82;s.erc--}
+  const rmf=clamp(65/s.rm,.7,1.6);   // compact (small-RMW) storms intensify/weaken faster than sprawling ones
+  const dv=land?-(s.v-8)*(.07+.06*Math.min(1,el/1500)):(tgt-s.v)*(tgt>s.v?.024:.032)*rmf+rn()*.05;
+  // Dissipation: once the kill condition is met the storm doesn't vanish, it spins down over ~18h - intensity
+  // and drawn opacity both ramp toward zero (s.fade) so a weakening TD/extratropical system visibly winds down,
+  // still drifting with the flow, rather than disappearing between two frames.
+  if(s.decay){s.v=Math.max(0,s.decayV0*(1-s.decay/18));s.fade=clamp(1-s.decay/18,0,1)}
+  else{s.v=Math.max(3,s.v+dv);s.fade=1}
+  s.max=Math.max(s.max,s.v);s.pmin=pOf(s.v);catEv(s);
   s.rm+=(clamp(65-.55*s.v+(s.lat-12),20,100)-s.rm)*.03;s.age++;s.spd=Math.hypot(s.mu,s.mv);
   if(s.age%3==0)s.trk.push([s.lon,s.lat,s.v]);
-  if(!land){const ci=Math.floor((s.lon-C.lon0)/D),cj=Math.floor((C.lat1-s.lat)/D);
+  if(!land&&!s.decay){const ci=Math.floor((s.lon-C.lon0)/D),cj=Math.floor((C.lat1-s.lat)/D),
+      mldf=clamp(1.3-clamp((s.lat-10)/20,0,1)*.7,.5,1.3);   // shallower thermocline away from the deep warm pool -> more self-cooling there
     for(let dj=-RR;dj<=RR;dj++)for(let di=-RR;di<=RR;di++){const i=ci+di,j=cj+dj;if(i>=0&&j>=0&&i<GW&&j<GH)
-      F.sa[j*GW+i]=Math.max(-4,F.sa[j*GW+i]-.0007*s.v*Math.exp(-(di*di+dj*dj)/SC))}}
+      F.sa[j*GW+i]=Math.max(-4,F.sa[j*GW+i]-.0007*s.v*mldf*Math.exp(-(di*di+dj*dj)/SC))}}
   if(s.obs){const p=obsAt(s.obs,S.t);s.err=p?Math.hypot((s.lon-p[0])*Math.cos(s.lat*R)*111,(s.lat-p[1])*111):null}
-  if((s.v<10&&(land||s.lat>36||s.age>120))||s.age>650)kill(s)}
+  if(!s.decay&&((s.v<10&&(land||s.lat>36||s.age>120))||s.age>650)){s.decay=1;s.decayV0=s.v}
+  else if(s.decay){s.decay++;if(s.decay>=18)kill(s)}}
 function kill(s){S.storms=S.storms.filter(x=>x!==s);S.hist.push(s);if(S.hist.length>12)S.hist.shift()}
 function bgField(){
     const el=F.el;for(let j=0;j<GH;j++)for(let i=0;i<GW;i++){const k=j*GW+i,fx=(i+.5)*D,fy=(j+.5)*D,x=fx|0,y=fy|0,tx=fx-x,ty=fy-y,a=y*CW+x,
@@ -223,7 +304,12 @@ function fields(){const{u,v,p,q,lv}=F;if(!bgOk||S.t%6===0)bgField();for(let m=0;
     const x=Math.pow(s.rm/r,1.4),vt=s.v*Math.sqrt(x*Math.exp(1-x))*Math.exp(-((r/900)**2)),tr=.4*Math.exp(-((r/500)**2)),f=FR[k],tu=-vt*dy/r,tv=vt*dx/r;
     u[k]+=(tu-.3*vt*dx/r+tr*s.mu)*f;v[k]+=(tv-.3*vt*dy/r+tr*s.mv)*f;p[k]-=(1010-s.pmin)*(1-Math.exp(-x));
     lv[2][k]+=tu;lv[3][k]+=tv;lv[4][k]+=tu*.45;lv[5][k]+=tv*.45;lv[6][k]-=tu*.2;lv[7][k]-=tv*.2;   // cyclone at 850, weak at 500, outflow anticyclone at 200
-    if(r<4*s.rm)q[k]+=(.97-q[k])*.06*Math.exp(-((r/(2.5*s.rm))**2))}}}}
+    // moisture: convective core moistens; the compensating subsidence in the storm's OWN secondary circulation dries an
+    // annulus around it (real TC structure - the dry moat just outside the eyewall). That annulus reaches several hundred
+    // km, so two storms close enough will each dry out the shared air the other would otherwise draw on - genuine
+    // moisture competition arising from each storm's own physics, not a bolt-on distance penalty.
+    const moist=Math.exp(-((r/(1.4*s.rm))**2)),dry=Math.max(0,Math.exp(-((r/700)**2))-Math.exp(-((r/220)**2)));
+    q[k]+=(.95-q[k])*.05*moist-q[k]*.02*dry}}}}
 function humidity(){const{u,v,q,q2,el,sst0,sa}=F;
   for(let j=0;j<GH;j++){const lat=C.lat1-(j+.5)*D,ck=D*111,cx=ck*Math.cos(lat*R);
    for(let i=0;i<GW;i++){const k=j*GW+i,x=clamp(i-u[k]*3.6/cx,0,GW-2.001),y=clamp(j+v[k]*3.6/ck,0,GH-2.001),
@@ -235,6 +321,6 @@ function humidity(){const{u,v,q,q2,el,sst0,sa}=F;
   F.q=q2;F.q2=q}
 S.step=function(){S.t++;if(S.hm&&!S.hOff&&!hindOn()){S.hOff=true;S.nextSpawn=S.t+gap(true)}env();if(hindOn()){loadAna();if(S.wx==='replay')ZP.set(ZA);else dyn();hindSpawn()}else dyn();composeCG();if(S.t%24==0)setSST(S.E.sn);
   if(S.t>=S.nextSpawn){if(S.storms.length<6){const f=S.spawn();if(f&&Math.random()<.3)S.spawn(f)}   /* ~30% of genesis events get a companion 900-1500 km away */ S.nextSpawn=S.t+gap()}
-  for(let k=0;k<N;k++)F.sa[k]*=.9985;
+  for(let k=0;k<N;k++)F.sa[k]*=.998;   // cold-wake recovery, ~21 d e-folding (real re-stratification is roughly 1-3 weeks)
   for(const s of S.storms.slice())upd(s);while(merge());fields();humidity()};
 })();

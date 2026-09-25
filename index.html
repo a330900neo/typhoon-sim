@@ -9,10 +9,11 @@
 <label>Speed <select id="speed"><option value="2">2 h/s</option><option value="6" selected>6 h/s</option><option value="24">24 h/s</option><option value="72">72 h/s</option></select></label>
 <label>Layer <select id="layer"><option value="wind">Wind speed</option><option value="pressure">Pressure</option><option value="humidity">Humidity</option><option value="sst">Sea surface temp</option><option value="none">Terrain only</option></select></label>
 <label>Wind <select id="wmode"><option value="particles">Particles</option><option value="arrows">Arrows</option><option value="off">Off</option></select></label>
-<label><input type="checkbox" id="iso" checked> Isobars</label><button id="ptoggle">☰</button></div>
+<label><input type="checkbox" id="iso" checked> Isobars</label><label><input type="checkbox" id="fcst"> Forecast</label><button id="ptoggle">☰</button></div>
 <aside id="panel"><div id="clock">Ready</div><h3>Active storms</h3><div id="storms"><em>None yet — press Start Sim</em></div>
 <h3>Layer</h3><canvas id="legend" width="220" height="10"></canvas><div id="legtxt"></div>
 <h3>Track nodes</h3><div style="font-size:12px;line-height:1.6"><span style="color:#ffd23b">●</span> intensity change (filled ↑, hollow ↓) &nbsp;<span style="color:#ffb347">▲</span> enters terrain &nbsp;<span style="color:#56e0ff">◆</span> exits to sea</div>
+<h3>Forecast</h3><div style="font-size:12px;line-height:1.5">Dashed line: steering extrapolation from today's flow, no future turbulence. Shaded cone ≈ typical track error by lead time (not this storm's actual spread).</div>
 <h3>Cursor</h3><div id="hover">Hover over the map</div>
 <p class="note">Drag to pan · wheel/pinch to zoom. Elevation: Terrarium tiles (AWS). Simplified physics — not a forecast.</p></aside>
 <div id="zoom"><button id="zin">+</button><button id="zout">−</button><button id="zfit">⌂</button></div>
