@@ -79,8 +79,9 @@ S.hm=false;S.hOff=false;
 const winEnd=()=>TS.hind.t0+(TS.hind.days-1)*864e5,hindOn=()=>S.hm&&!!TS.hind&&S.t0+S.t*36e5<=winEnd();
 S.mode=()=>S.wx==='synth'||!TS.hind?'synthetic weather':!S.hm?'no reanalysis for this date: climatology + stochastic genesis':hindOn()?(S.wx==='replay'?'real weather (replay)':'real weather (free-run)'):'reanalysis ended: climatology + stochastic genesis';
 const rateNow=()=>{const st=TS.stats;if(!st)return null;const x=doyOf(S.t)/30.4375-.5,m0=((Math.floor(x)%12)+12)%12,f=x-Math.floor(x);return st.rate[m0]*(1-f)+st.rate[(m0+1)%12]*f};
-const gap=first=>{const rt=rateNow();if(rt==null)return Math.min(720,(first?Math.random()*60:30+Math.random()*110)/act());
-  return Math.min(1500,-Math.log(1-Math.random())*720/Math.max(.05,rt*TS.tune.rate)*(first?Math.random():1))};
+const gap=first=>{const rt=rateNow(),mact=clamp(1+.7*S.E.mjo,.2,2.5);   // MJO-like active/quiet spell modulation of genesis frequency
+  if(rt==null)return Math.min(720,(first?Math.random()*60:30+Math.random()*110)/act()/mact);
+  return Math.min(1500,-Math.log(1-Math.random())*720/Math.max(.05,rt*TS.tune.rate*mact)*(first?Math.random():1))};
 const AU=[0,1,2].map(()=>new Float32Array(NC)),AV=[0,1,2].map(()=>new Float32Array(NC)),ZA=new Float64Array(NC);
 function loadAna(){const H=TS.hind,x=clamp((S.t0+S.t*36e5-H.t0)/864e5-.5,0,H.days-1.001),d0=x|0,f=x-d0,D=H.data;   // analysis fields, time-interpolated between daily means
   for(let l=0;l<3;l++)for(let c=0;c<2;c++){const o0=((d0*3+l)*2+c)*NC,o1=o0+6*NC,A=c?AV[l]:AU[l];for(let k=0;k<NC;k++)A[k]=.01*(D[o0+k]*(1-f)+D[o1+k]*f)}
@@ -137,16 +138,17 @@ function dyn(){const dt=1800;                                     // Wicker-Skam
   for(let n=0;n<2;n++){tend(ZP,T1);for(let k=0;k<NC;k++)Z1[k]=ZP[k]+dt/3*T1[k];tend(Z1,T1);for(let k=0;k<NC;k++)Z2[k]=ZP[k]+dt/2*T1[k];
     tend(Z2,T1);for(let k=0;k<NC;k++)ZP[k]+=dt*T1[k]}}
 function blob(lon,lat,r0,amp){for(let j=1;j<CH-1;j++)for(let i=1;i<CW-1;i++){const dx=(C.lon0+i-lon)*rc[j]/r0,dy=(C.lat1-j-lat)/r0,q=dx*dx+dy*dy;if(q<9)ZP[j*CW+i]+=amp*Math.exp(-q)}}
-function force(){const E=S.E,sn=E.sn,sgn=()=>Math.random()<.5?-1:1;       // random vorticity stirring: mid-lat waves (more in winter), tropical disturbances (more in summer)
-  if(Math.random()<(.5+.5*(1-sn))/30)blob(94+Math.random()*30,E.jl+(Math.random()-.5)*16,8,sgn()*(2+3*Math.random())*1e-5);
-  if(Math.random()<(.4+.6*sn)/40)blob(110+Math.random()*60,7+Math.random()*16,5,(Math.random()<.65?1:-1)*(1.2+2*Math.random())*1e-5)}
+function force(amp){amp=amp==null?1:amp;const E=S.E,sn=E.sn,sgn=()=>Math.random()<.5?-1:1;       // random vorticity stirring: mid-lat waves (more in winter), tropical disturbances (more in summer)
+  if(Math.random()<(.5+.5*(1-sn))/30)blob(94+Math.random()*30,E.jl+(Math.random()-.5)*16,8,sgn()*(2+3*Math.random())*1e-5*amp);
+  if(Math.random()<(.4+.6*sn)/40)blob(110+Math.random()*60,7+Math.random()*16,5,(Math.random()<.65?1:-1)*(1.2+2*Math.random())*1e-5*amp)}
 function composeCG(){solve(ZP,PP);const ay=1/(2*R*AE);
   for(let j=0;j<CH;j++){const ax=ay/rc[j];for(let i=0;i<CW;i++){const k=j*CW+i,ed=i==0||j==0||i==CW-1||j==CH-1,u=ed?0:-(PP[k-CW]-PP[k+CW])*ay,v=ed?0:(PP[k+1]-PP[k-1])*ax;
     for(let l=0;l<3;l++){const rp=S.wx==='replay'&&hindOn();CG[2+2*l][k]=rp?AU[l][k]:MU[l][k]+LF[l]*u;CG[3+2*l][k]=rp?AV[l][k]:MV[l][k]+LF[l]*v}
     const u8=CG[2][k],v8=CG[3][k];CG[0][k]=.78*(u8*CA-v8*CS);CG[1][k]=.78*(u8*CS+v8*CA);CP[k]=PM[k]+4e-7*PP[k]}}}
-function env(){const E=S.E;E.sn=seas(S.t);if(S.t%24==0)meanField();if(!hindOn())force()}
+function env(){const E=S.E;E.sn=seas(S.t);if(S.t%24==0){meanField();E.mjo+=-E.mjo*.05+rn()*.15}
+  if(!hindOn())force();else if(S.wx!=='replay')force(.5)}   // free-run: keep new troughs/disturbances forming (at half strength, since we started from a real, already-perturbed state) instead of letting the anomaly relax back to pure climatology
 // Deep-layer mean steering on a 3° ring. Weak/sheared storms follow 850/500; intense storms add 200 hPa.
-const RING=[[0,0],[3,0],[-3,0],[0,3],[0,-3]];
+const RING=[[0,0],[3,0],[-3,0],[0,3],[0,-3],[2.2,2.2],[-2.2,2.2],[2.2,-2.2],[-2.2,-2.2]];
 function steer(lon,lat,vs){const A=[0,0,0,0,0,0];for(const[dx,dy]of RING)for(let m=0;m<6;m++)A[m]+=cs(m+2,lon+dx,lat+dy)/RING.length;
   const[a,b,c,d,e,f]=A,sh=.8*Math.hypot(e-a,f-b),
     ridge=clamp((lat-(S.E.ry-8))/12,0,1),          // approaching/poleward of the ridge nose -> feel the deep layer even if not intense, so recurvature isn't gated on strength alone
@@ -161,7 +163,7 @@ S.init=function(el){F.el=el;const t=new Float32Array(N),r=Math.round(3*GS),w=2*r
   S.reset()};
 S.reset=function(){S.storms=[];S.hist=[];S.t=0;S.running=false;S.hm=S.wx!=='synth'&&!!TS.hind&&S.t0>=TS.hind.t0&&S.t0<=winEnd();S.hOff=false;bgOk=false;F.sa.fill(0);ZP.fill(0);PP.fill(0);investN=90;nameSeq=0;
   const sn=seas(0),en=clamp(rn()*.6,-1,1);        // en>0 El Niño (ridge retreats east, genesis shifts east), <0 La Niña
-  S.E={sn,enso:en,mo:rn()*4,rx:0,ry:0,ra:1,jl:0,mtx:0,mty:0};meanField();
+  S.E={sn,enso:en,mo:rn()*4,rx:0,ry:0,ra:1,jl:0,mtx:0,mty:0,mjo:0};meanField();
   if(hindOn()){hindInit();loadAna();ZP.set(ZA)}                        // start from the observed 500 hPa anomaly
   else{for(let n=0;n<8;n++)force();for(let n=0;n<4;n++){blob(94+Math.random()*60,12+Math.random()*30,7,(Math.random()<.5?-1:1)*3e-5)}
     for(let h=0;h<96;h++){S.E.sn=sn;force();dyn()}}                     // spin-up so waves/troughs already exist at T+0
@@ -173,7 +175,7 @@ S.reset=function(){S.storms=[];S.hist=[];S.t=0;S.running=false;S.hm=S.wx!=='synt
 // ocean - this lets genesis "see" the same troughs/waves the isobars and wind layers are already drawing on screen.
 function vort850(lon,lat){const h=1,cl=Math.max(.15,Math.cos(lat*R));
   return((cs(3,lon+h,lat)-cs(3,lon-h,lat))/cl-(cs(2,lon,lat+h)*Math.cos((lat+h)*R)-cs(2,lon,lat-h)*Math.cos((lat-h)*R))/cl)/(2*h*R*AE)}
-const MINSEP=700;   // km - independent (non-companion) genesis events are rejected within this range of an existing storm, so systems don't spawn on top of each other
+const MINSEP=850;   // km - independent (non-companion) genesis events are rejected within this range of an existing storm, so systems don't spawn on top of each other
 S.spawn=function(near){const E=S.E,st=TS.stats;
   for(let n=0;n<300;n++){let lon,lat;
     if(near){lon=near.lon+(Math.random()<.5?-1:1)*(8+6*Math.random());lat=near.lat+(Math.random()-.5)*6}
@@ -184,15 +186,27 @@ S.spawn=function(near){const E=S.E,st=TS.stats;
     if(!near){let tooClose=false;for(const o of S.storms){if(Math.hypot((lon-o.lon)*Math.cos(lat*R)*111,(lat-o.lat)*111)<MINSEP){tooClose=true;break}}if(tooClose)continue}
     const sh=.8*Math.hypot(cs(6,lon,lat)-cs(2,lon,lat),cs(7,lon,lat)-cs(3,lon,lat)),
       vf=clamp(1+vort850(lon,lat)*4e4,.2,3),                            // favor spots with a live cyclonic disturbance; disfavor (but don't zero out) ridges
-      w=clamp((F.sst0[k]-26.5)/1.5,0,1)*clamp(1-sh/16,0,1)*clamp((lat-5)/5,0,1)*vf*(st&&!near?1:(.25+1.6*Math.exp(-(((lon-E.mtx)/22)**2+((lat-E.mty-2)/6)**2)))*Math.exp(-(((lon-142-14*E.enso)/30)**2)));
+      rh=clamp((F.q[k]-.35)/.3,.12,1),                                  // moist mid-troposphere (Gray's 4th genesis parameter): dry air aloft suppresses convection and genesis
+      w=clamp((F.sst0[k]-26.5)/1.5,0,1)*clamp(1-sh/16,0,1)*clamp((lat-5)/5,0,1)*vf*rh*(st&&!near?1:(.25+1.6*Math.exp(-(((lon-E.mtx)/22)**2+((lat-E.mty-2)/6)**2)))*Math.exp(-(((lon-142-14*E.enso)/30)**2)));
     if(Math.random()>=w)continue;const v=12+Math.random()*3,inv=investN;investN=investN>=99?90:investN+1;
     S.storms.push({id:++S.uid,name:'Invest '+inv+'W',named:false,lon,lat,v,pmin:pOf(v),rm:60,mu:-3+rn()*1.5,mv:1+rn(),nu:0,nv:0,age:0,max:v,land:false,spd:5,sv:[0,0],trk:[[lon,lat,v]],ev:[]});return S.storms[S.storms.length-1]}};
+// Manual placement (D + click in the UI): drop a fresh TD-strength invest at an exact point, bypassing the
+// genesis favorability sampling in S.spawn (the user is choosing the spot on purpose). Still refuses land and
+// open water outside the grid, since a cyclone can't spin up there. Returns null (and a reason string) on refusal.
+S.spawnAt=function(lon,lat){
+  if(!F.el)return{ok:false,why:'terrain not loaded yet'};
+  const k=cellIdx(lon,lat);if(k<0)return{ok:false,why:'outside the modeled domain'};
+  if(F.el[k]>0)return{ok:false,why:'over land'};
+  const v=12+Math.random()*3,inv=investN;investN=investN>=99?90:investN+1;
+  const s={id:++S.uid,name:'Invest '+inv+'W',named:false,lon,lat,v,pmin:pOf(v),rm:60,mu:-3+rn()*1.5,mv:1+rn(),nu:0,nv:0,age:0,max:v,land:false,spd:5,sv:[0,0],trk:[[lon,lat,v]],ev:[]};
+  S.storms.push(s);return{ok:true,storm:s}};
 // Fujiwhara: each storm is advected by the (depth-averaged) flow induced by the others, counter-clockwise about the neighbour (NH), plus a
 // weak inward drift at close range. Depth-averaging over the storm's own scale means the steering push is only a small fraction of the
-// neighbour's peak tangential wind, and it dies off within ~1000 km (real interaction is a 1-3 m/s effect out to ~1000 km, ~4 m/s max near 300 km).
+// neighbour's peak tangential wind: ~4 m/s max near 300 km, tapering to roughly 1 m/s by ~800-1000 km and fading out by ~1400 km,
+// matching the separation at which real binary-typhoon interaction is typically described as becoming noticeable.
 function fuji(s){let U=0,V=0;for(const o of S.storms){if(o===s)continue;
   const dx=(s.lon-o.lon)*Math.cos(s.lat*R)*111,dy=(s.lat-o.lat)*111,r=Math.hypot(dx,dy)+1e-3;
-  if(r<1000){const x=Math.pow(o.rm/r,1.4),vt=Math.min(4,.2*o.v*Math.sqrt(x*Math.exp(1-x))*Math.exp(-((r/600)**2))),inw=r<600?.12:0;
+  if(r<1400){const x=Math.pow(o.rm/r,1.4),vt=Math.min(4,.2*o.v*Math.sqrt(x*Math.exp(1-x))*Math.exp(-((r/750)**2))),inw=r<600?.12:0;
     U+=-dy/r*vt-dx/r*vt*inw;V+=dx/r*vt-dy/r*vt*inw}}
   return[U,V]}
 S.fuji=fuji;
@@ -208,7 +222,7 @@ const coneR=h=>{if(h<=0)return 0;let i=1;while(i<CONE.length-1&&CONE[i][0]<h)i++
   const a=CONE[i-1],b=CONE[i],t=(h-a[0])/(b[0]-a[0]||1);return a[1]+(b[1]-a[1])*t};
 function fujiF(f,set){let U=0,V=0;for(const o of set){if(o===f||o.dead)continue;
   const dx=(f.lon-o.lon)*Math.cos(f.lat*R)*111,dy=(f.lat-o.lat)*111,r=Math.hypot(dx,dy)+1e-3;
-  if(r<1000){const x=Math.pow(o.rm/r,1.4),vt=Math.min(4,.2*o.v*Math.sqrt(x*Math.exp(1-x))*Math.exp(-((r/600)**2))),inw=r<600?.12:0;
+  if(r<1400){const x=Math.pow(o.rm/r,1.4),vt=Math.min(4,.2*o.v*Math.sqrt(x*Math.exp(1-x))*Math.exp(-((r/750)**2))),inw=r<600?.12:0;
     U+=-dy/r*vt-dx/r*vt*inw;V+=dx/r*vt-dy/r*vt*inw}}
   return[U,V]}
 function nbShearF(f,set){let u8=0,v8=0,u2=0,v2=0;for(const o of set){if(o===f||o.dead)continue;
@@ -262,11 +276,11 @@ function upd(s){const k=cellIdx(s.lon,s.lat);if(k<0)return kill(s);
   const betaMag=(.6+1.5*clamp(s.rm/90,0,1))*clamp(1.3-s.lat/60,.5,1.3),betaU=-betaMag*.7,betaV=betaMag*.85;
   const[fjU,fjV]=fuji(s);
   const nz=1+clamp((4-Math.hypot(st.u,st.v))/4,0,1);   // persistent (~3 day) wobble, larger when steering is weak
-  s.nu=s.nu*.99+rn()*.22*nz;s.nv=s.nv*.99+rn()*.22*nz;
+  s.nu=s.nu*.99+rn()*.055*nz;s.nv=s.nv*.99+rn()*.055*nz;   // amplitude cut ~4x (was .22) - real tracks are only faintly trochoidal, not visibly looping
   s.mu+=((st.u+betaU+fjU)*.95*slow+tx+s.nu-s.mu)/13;s.mv+=((st.v+betaV+fjV)*.95*slow+ty+s.nv-s.mv)/13;
   s.lon+=s.mu*3.6/(111*Math.cos(s.lat*R));s.lat+=s.mv*3.6/111;
   const shear=st.shear+nbShear(s),rel=clamp((F.q[k]-.35)/.4,0,1),mpi=12+80*clamp((sst-26)/4,0,1);
-  let tgt=mpi*clamp(1-shear/32,.12,1)*(.65+.35*rel)*clamp((s.lat-5)/8,0,1);
+  let tgt=mpi*clamp(1-shear/32,.12,1)*(.55+.45*rel)*clamp((s.lat-5)/8,0,1);
   // eyewall replacement cycle: a mature, near-peak storm occasionally spends ~a day reorganising its inner
   // core, capping its target intensity a bit below MPI before it's free to re-strengthen - gives the
   // plateau-then-wobble near peak intensity real best-tracks show, instead of a smooth climb straight to MPI.
@@ -305,11 +319,12 @@ function fields(){const{u,v,p,q,lv}=F;if(!bgOk||S.t%6===0)bgField();for(let m=0;
     u[k]+=(tu-.3*vt*dx/r+tr*s.mu)*f;v[k]+=(tv-.3*vt*dy/r+tr*s.mv)*f;p[k]-=(1010-s.pmin)*(1-Math.exp(-x));
     lv[2][k]+=tu;lv[3][k]+=tv;lv[4][k]+=tu*.45;lv[5][k]+=tv*.45;lv[6][k]-=tu*.2;lv[7][k]-=tv*.2;   // cyclone at 850, weak at 500, outflow anticyclone at 200
     // moisture: convective core moistens; the compensating subsidence in the storm's OWN secondary circulation dries an
-    // annulus around it (real TC structure - the dry moat just outside the eyewall). That annulus reaches several hundred
-    // km, so two storms close enough will each dry out the shared air the other would otherwise draw on - genuine
-    // moisture competition arising from each storm's own physics, not a bolt-on distance penalty.
-    const moist=Math.exp(-((r/(1.4*s.rm))**2)),dry=Math.max(0,Math.exp(-((r/700)**2))-Math.exp(-((r/220)**2)));
-    q[k]+=(.95-q[k])*.05*moist-q[k]*.02*dry}}}}
+    // annulus around it (real TC structure - the dry moat just outside the eyewall). That annulus reaches out to
+    // ~800-1000+ km, so two storms at typical binary/companion separations will each dry out the shared air the
+    // other would otherwise draw on - genuine moisture competition arising from each storm's own physics, not a
+    // bolt-on distance penalty.
+    const moist=Math.exp(-((r/(1.4*s.rm))**2)),dry=Math.max(0,Math.exp(-((r/900)**2))-Math.exp(-((r/220)**2)));
+    q[k]+=(.95-q[k])*.05*moist-q[k]*.03*dry}}}}
 function humidity(){const{u,v,q,q2,el,sst0,sa}=F;
   for(let j=0;j<GH;j++){const lat=C.lat1-(j+.5)*D,ck=D*111,cx=ck*Math.cos(lat*R);
    for(let i=0;i<GW;i++){const k=j*GW+i,x=clamp(i-u[k]*3.6/cx,0,GW-2.001),y=clamp(j+v[k]*3.6/ck,0,GH-2.001),

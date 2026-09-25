@@ -7,11 +7,26 @@ function resize(){dpr=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight
 const X=lon=>(lon-V.lon)*V.s*KX+W/2,Y=lat=>(V.lat-lat)*V.s+H/2,LON=x=>V.lon+(x-W/2)/(V.s*KX),LAT=y=>V.lat-(y-H/2)/V.s;
 function zoomAt(x,y,f){const lo=LON(x),la=LAT(y);V.s=clamp(V.s*f,minS(),600);V.lon=lo-(x-W/2)/(V.s*KX);V.lat=la+(y-H/2)/V.s;fixV()}
 const ptr=new Map(),pinch=()=>{if(ptr.size<2)return null;const[a,b]=[...ptr.values()];return{d:Math.hypot(a[0]-b[0],a[1]-b[1]),x:(a[0]+b[0])/2,y:(a[1]+b[1])/2}};let pd=null;
-cv.onpointerdown=e=>{cv.setPointerCapture(e.pointerId);ptr.set(e.pointerId,[e.clientX,e.clientY]);pd=pinch()};
+// hold D + click: drop a manual TD invest at the clicked point (see S.spawnAt in sim.js)
+let keyD=false,downPos=null;
+const setKeyD=v=>{keyD=v;cv.classList.toggle('dspawn',v)};
+addEventListener('keydown',e=>{if((e.key==='d'||e.key==='D')&&!e.repeat&&!/input|select|textarea/i.test(e.target.tagName))setKeyD(true)});
+addEventListener('keyup',e=>{if(e.key==='d'||e.key==='D')setKeyD(false)});
+addEventListener('blur',()=>setKeyD(false));
+let toastT=0;function toast(msg,bad){const t=$('toast');t.textContent=msg;t.classList.toggle('bad',!!bad);t.classList.add('show');
+  clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),1500)}
+cv.onpointerdown=e=>{cv.setPointerCapture(e.pointerId);downPos=[e.clientX,e.clientY];
+  if(keyD)return;   // D-held click is a spawn gesture only, never a pan/zoom drag
+  ptr.set(e.pointerId,[e.clientX,e.clientY]);pd=pinch()};
 cv.onpointermove=e=>{hover(e);const o=ptr.get(e.pointerId);if(!o)return;
   if(ptr.size==1){V.lon-=(e.clientX-o[0])/(V.s*KX);V.lat+=(e.clientY-o[1])/V.s;fixV()}
   ptr.set(e.pointerId,[e.clientX,e.clientY]);const p=pinch();if(p&&pd){zoomAt(p.x,p.y,p.d/pd.d);V.lon-=(p.x-pd.x)/(V.s*KX);V.lat+=(p.y-pd.y)/V.s;fixV()}pd=p};
-cv.onpointerup=cv.onpointercancel=e=>{ptr.delete(e.pointerId);pd=null};
+cv.onpointerup=cv.onpointercancel=e=>{
+  if(keyD&&downPos&&ptr.size===0&&Math.hypot(e.clientX-downPos[0],e.clientY-downPos[1])<6){
+    const r=S.spawnAt(LON(e.clientX),LAT(e.clientY));
+    if(r&&r.ok){toast(r.storm.name+' spawned');dirty=true;ui()}else toast("Can't spawn — "+((r&&r.why)||'try open ocean'),true)}
+  ptr.delete(e.pointerId);pd=null;downPos=null;
+  try{cv.releasePointerCapture(e.pointerId)}catch(_){}};
 cv.addEventListener('wheel',e=>{e.preventDefault();zoomAt(e.clientX,e.clientY,Math.exp(-e.deltaY*.0015))},{passive:false});
 $('zin').onclick=()=>zoomAt(W/2,H/2,1.5);$('zout').onclick=()=>zoomAt(W/2,H/2,1/1.5);$('zfit').onclick=()=>{V.s=minS();V.lon=135;V.lat=22;fixV()};
 // colormaps
@@ -20,17 +35,25 @@ const build=st=>{const a=new Uint8Array(768);for(let k=0;k<256;k++){const f=k/25
 const L={wind:{lo:0,hi:90,u:'m/s',st:[[0,[8,16,60]],[.19,[0,170,225]],[.27,[35,205,95]],[.37,[255,235,0]],[.49,[255,120,0]],[.6,[225,15,15]],[.8,[190,0,120]],[1,[255,255,255]]]},
  pressure:{lo:900,hi:1025,u:'hPa',st:[[0,[200,60,200]],[.2,[220,40,60]],[.5,[240,200,60]],[.8,[80,200,120]],[1,[30,60,140]]]},
  humidity:{lo:0,hi:1,u:'rel. humidity',st:[[0,[190,150,90]],[.5,[110,190,190]],[.8,[40,120,200]],[1,[10,40,150]]]},
- sst:{lo:15,hi:31,u:'°C',st:[[0,[40,60,160]],[.5,[60,180,200]],[.7,[240,220,80]],[.87,[240,130,40]],[1,[200,30,40]]]}};
+ sst:{lo:15,hi:31,u:'°C',st:[[0,[40,60,160]],[.5,[60,180,200]],[.7,[240,220,80]],[.87,[240,130,40]],[1,[200,30,40]]]},
+};
 for(const k in L)L[k].lut=build(L[k].st);
 const CAT=[[105,'Violent Typhoon','#ff2bd6'],[85,'Very Strong Typhoon','#ff3b3b'],[64,'Typhoon','#ff8a2b'],[48,'Severe Tropical Storm','#ffd23b'],[34,'Tropical Storm','#7fe06a'],[0,'Tropical Depression','#5ec8ff']];
 const cat=v=>CAT.find(c=>v*1.944>=c[0]);
 let lvU=F.u,lvV=F.v,base,layer='wind',speed=6,acc=0,last=performance.now(),fr=0,dirty=true,isoT=0,iso=[],SM;
+const announced=new WeakSet();
+function announceEvents(){for(const s of S.storms.concat(S.hist))for(const e of s.ev||[]){if(announced.has(e))continue;announced.add(e);
+  const name=s.name||'Storm';
+  if(e.t==='i')toast(`${name} ${e.up?'intensifying':'weakening'}: ${CAB[e.c]}`);
+  else if(e.t==='in')toast(`${name} entered land`,true);
+  else if(e.t==='out')toast(`${name} returned to sea`)} }
 const ov=document.createElement('canvas');ov.width=GW;ov.height=GH;const og=ov.getContext('2d'),oi=og.createImageData(GW,GH);
 function legend(){const l=L[layer],c=$('legend').getContext('2d');c.clearRect(0,0,220,10);if(!l){$('legtxt').textContent='';return}
   for(let x=0;x<220;x++){const k=((x/219*255)|0)*3;c.fillStyle=`rgb(${l.lut[k]},${l.lut[k+1]},${l.lut[k+2]})`;c.fillRect(x,0,1,10)}$('legtxt').textContent=`${l.lo} → ${l.hi} ${l.u}`}
 function updOverlay(){const l=L[layer];if(!l)return;const d=oi.data;
   for(let k=0;k<GW*GH;k++){const val=layer==='wind'?Math.hypot(lvU[k],lvV[k]):layer==='sst'?F.sst0[k]+F.sa[k]:layer==='pressure'?F.p[k]:F.q[k],
-    i=clamp(((val-l.lo)/(l.hi-l.lo)*255)|0,0,255)*3;d[k*4]=l.lut[i];d[k*4+1]=l.lut[i+1];d[k*4+2]=l.lut[i+2];d[k*4+3]=layer==='sst'&&F.el[k]>0?0:150}
+    i=clamp(((val-l.lo)/(l.hi-l.lo)*255)|0,0,255)*3;d[k*4]=l.lut[i];d[k*4+1]=l.lut[i+1];d[k*4+2]=l.lut[i+2];
+    d[k*4+3]=layer==='sst'&&F.el[k]>0?0:150}
   og.putImageData(oi,0,0)}
 // isobars via marching squares (4 hPa), segments in grid coords
 function calcIso(){const p=F.p;
@@ -82,10 +105,10 @@ function nodes(){const lab=V.s>=14;g.font='bold 10px sans-serif';
       if(lab){const t=e.t==='i'?(e.up?'↑ ':'↓ ')+CAB[e.c]:e.t==='in'?`LANDFALL ${(e.v*1.944)|0} kt`:'exit to sea';g.lineWidth=3;g.strokeStyle='#000';g.fillStyle='#fff';g.strokeText(t,x+8,y-6);g.fillText(t,x+8,y-6)}}}
   g.globalAlpha=1}
 function tracks(){if(S.hm&&TS.hind)for(const o of TS.hind.storms){if(!o.done)continue;g.save();g.setLineDash([5,4]);g.strokeStyle='rgba(255,255,255,.75)';g.lineWidth=1.6;g.beginPath();o.trk.forEach((p,i)=>i?g.lineTo(X(p[1]),Y(p[2])):g.moveTo(X(p[1]),Y(p[2])));g.stroke();g.restore()}
-  for(const s of S.hist.concat(S.storms)){g.globalAlpha=(S.hist.includes(s)?.4:1)*(s.fade==null?1:s.fade);g.lineWidth=2.2;
+  for(const s of S.hist.concat(S.storms)){const isHist=S.hist.includes(s);g.globalAlpha=isHist?.35:(s.fade==null?1:s.fade);g.lineWidth=2.2;
   for(let i=1;i<s.trk.length;i++){g.strokeStyle=cat(s.trk[i][2])[2];g.beginPath();g.moveTo(X(s.trk[i-1][0]),Y(s.trk[i-1][1]));g.lineTo(X(s.trk[i][0]),Y(s.trk[i][1]));g.stroke()}}
   nodes();g.globalAlpha=1;g.font='bold 12px sans-serif';
-  for(const s of S.storms){g.globalAlpha=(s.named?1:.55)*(s.fade==null?1:s.fade);const x=X(s.lon),y=Y(s.lat),c=cat(s.v)[2],r=8+s.v/8,a=fr*.06;g.fillStyle=c+'44';g.strokeStyle=c;g.lineWidth=2.5;g.beginPath();g.arc(x,y,r,0,7);g.fill();
+  for(const s of S.storms){g.globalAlpha=(s.named?1:.55)*(s.fade==null?1:s.fade);const x=X(s.lon),y=Y(s.lat),c=cat(s.v)[2],r=8+s.v/8,a=fr*clamp(.02+s.v*.0016,.02,.13);g.fillStyle=c+'44';g.strokeStyle=c;g.lineWidth=2.5;g.beginPath();g.arc(x,y,r,0,7);g.fill();
     for(let k=0;k<2;k++){g.beginPath();g.arc(x,y,r*.65,a+k*Math.PI,a+k*Math.PI+2.2);g.stroke()}
     if(s.sv){g.strokeStyle='#fff';g.lineWidth=2;g.beginPath();g.moveTo(x,y);g.lineTo(x+s.sv[0]*7,y-s.sv[1]*7);g.stroke()}
     const kt=s.v*1.944,sp=s.spd*1.944,hd=(Math.atan2(s.mu,s.mv)*180/Math.PI+360)%360,dir=['N','NE','E','SE','S','SW','W','NW'][Math.round(hd/45)%8],
@@ -106,7 +129,7 @@ function drawForecast(){for(const f of fcData){const trk=f.trk;if(trk.length<2)c
     for(let i=0;i<trk.length;i++){const[lo,la,v]=trk[i],x=X(lo),y=Y(la),c=cat(v)[2],h=i*3;
       g.beginPath();g.arc(x,y,4,0,7);g.fillStyle=c;g.strokeStyle='#fff';g.lineWidth=1.5;g.fill();g.stroke();
       if(h%24===0&&h>0){g.lineWidth=3;g.strokeStyle='#000';g.fillStyle='#fff';g.strokeText('+'+h+'h',x+6,y-6);g.fillText('+'+h+'h',x+6,y-6)}}}}
-function ui(){const d=new Date(S.t0+S.t*36e5);$('clock').textContent=`${d.toISOString().slice(0,16).replace('T',' ')}Z  (T+${S.t}h) · ${S.E.enso>.3?'El Niño':S.E.enso<-.3?'La Niña':'ENSO-neutral'} · ${S.mode()}`;
+function ui(){const d=new Date(S.t0+S.t*36e5);$('clock').textContent=`${d.toISOString().slice(0,16).replace('T',' ')}Z  (T+${S.t}h) · ${S.E.enso>.3?'El Niño':S.E.enso<-.3?'La Niña':'ENSO-neutral'} · ${S.E.mjo>.25?'active spell':S.E.mjo<-.25?'quiet spell':'near-avg activity'} · ${S.mode()}`;
   let h=S.storms.map(s=>{const c=cat(s.v);return `<div class="st" style="border-color:${c[2]}"><b>${s.name}</b> — ${c[1]}<br>${(s.v*1.944)|0} kt (${s.v.toFixed(0)} m/s) · ${s.pmin.toFixed(0)} hPa · RMW ${s.rm.toFixed(0)} km<br>${s.lat.toFixed(1)}°N ${s.lon.toFixed(1)}°E · ${(s.spd*1.944).toFixed(0)} kt${s.land?' · <b style="color:#ffb347">LANDFALL</b>':''}${s.lf?' · '+s.lf+' landfall'+(s.lf>1?'s':''):''}${s.err!=null?' · obs err '+(s.err|0)+' km':''}</div>`}).join('');
   h+=S.hist.slice(-5).reverse().map(s=>`<div class="st" style="border-color:#556;opacity:.7">${s.name} ${s.by?'absorbed by '+s.by:'dissipated'} · peak ${(s.max*1.944)|0} kt</div>`).join('');
   $('storms').innerHTML=h||'<em>None yet — press Start Sim</em>'}
@@ -114,10 +137,14 @@ function hover(e){if(!TS.elev0)return;const lon=LON(e.clientX),lat=LAT(e.clientY
   const ix=Math.min(C.bw-1,Math.max(0,((lon-C.lon0)*C.bw/90)|0)),iy=Math.min(C.bh-1,Math.max(0,((C.lat1-lat)*C.bh/55)|0)),el=TS.elev0[iy*C.bw+ix],w=Math.hypot(F.u[k],F.v[k]);
   $('hover').innerHTML=`${lat.toFixed(2)}°N ${lon.toFixed(2)}°E<br>${el>0?'Elev':'Depth'}: ${Math.abs(el)|0} m<br>Surface wind: ${w.toFixed(1)} m/s (${(w*1.944)|0} kt)<br>${[['850',2],['500',4],['200',6]].map(([n,m])=>{const u=F.lv[m][k],v=F.lv[m+1][k];return `${n} hPa: ${Math.hypot(u,v).toFixed(0)} m/s from ${((270-Math.atan2(v,u)*180/Math.PI)%360+360)%360|0}°`}).join('<br>')}<br>Pressure: ${F.p[k].toFixed(1)} hPa<br>Humidity: ${(F.q[k]*100)|0}%<br>SST: ${(F.sst0[k]+F.sa[k]).toFixed(1)} °C`}
 function loop(now){const dt=Math.min(.1,(now-last)/1000);last=now;
-  if(S.running){acc+=dt*speed;const t0=performance.now();let n=0;while(acc>=1&&n<48&&performance.now()-t0<14){S.step();acc--;n++;dirty=true}if(acc>3)acc=3}
-  if(dirty){updOverlay();if(now-isoT>250){calcIso();isoT=now;dirty=false}}
+  if(S.running){acc+=dt*speed;const t0=performance.now();let n=0;
+    while(acc>=1&&n<48&&performance.now()-t0<14){
+      S.step();
+      acc--;n++;dirty=true}
+    if(acc>3)acc=3}
+  announceEvents();if(dirty){updOverlay();if(now-isoT>250){calcIso();isoT=now;dirty=false}}
   g.drawImage(base,0,0,C.bw,C.bh,X(C.lon0),Y(C.lat1),90*V.s*KX,55*V.s);
-  if(L[layer])g.drawImage(ov,0,0,GW,GH,X(C.lon0),Y(C.lat1),90*V.s*KX,55*V.s);
+  if(L[layer]){g.imageSmoothingEnabled=true;g.drawImage(ov,0,0,GW,GH,X(C.lon0),Y(C.lat1),90*V.s*KX,55*V.s)}
   if($('iso').checked)drawIso();const wm=$('wmode').value;if(wm==='particles')particles();else if(wm==='arrows')arrows();
   tracks();if($('fcst').checked){if(!fcData||S.t-fcT>=3){fcData=S.forecast(120);fcT=S.t}drawForecast()}
   if(++fr%8==0)ui();requestAnimationFrame(loop)}
@@ -127,7 +154,9 @@ $('speed').onchange=e=>speed=+e.target.value;$('layer').onchange=e=>{layer=e.tar
 $('lvl').onchange=e=>{const m={sfc:0,850:2,500:4,200:6}[e.target.value];lvU=F.lv[m];lvV=F.lv[m+1];dirty=true};
 $('date').onchange=e=>{let t=Date.parse(e.target.value+'T00:00:00Z');if(isNaN(t))return;S.t0=t;$('reset').onclick()};
 $('wx').onchange=e=>{S.wx=e.target.value;$('date').onchange({target:$('date')})};
-$('ptoggle').onclick=()=>$('panel').classList.toggle('hide');addEventListener('resize',resize);
+$('ptoggle').onclick=()=>$('panel').classList.toggle('hide');
+$('ttoggle').onclick=()=>{document.body.classList.add('top-hidden');$('top').classList.add('hide')};
+$('tshow').onclick=()=>{document.body.classList.remove('top-hidden');$('top').classList.remove('hide')};addEventListener('resize',resize);
 S.t0=Date.parse($('date').value+'T00:00:00Z');resize();V.s=minS();fixV();
 TS.loadTerrain(p=>$('loading').textContent=`Loading terrain… ${(p*100)|0}%`).then(async el=>{await TS.loadClim('js/clim.bin');await TS.loadStats('js/stats.json');await TS.loadHind('js/hind.bin','js/hind.json');if(TS.hind)await TS.loadHindSST('js/hind_sst.bin');$('wx').disabled=!TS.hind;document.querySelector('.note').insertAdjacentHTML('beforeend','<br>Mean flow: '+(TS.clim?'reanalysis climatology':'analytic (run tools/make_clim.py)')+'; anomalies: barotropic model.'+(TS.stats?' Genesis from IBTrACS.':'')+(TS.hind?' Hindcast window: '+TS.hind.start+' + '+TS.hind.days+' d (dates outside it fall back to climatology + stochastic genesis).':' No hindcast loaded — Weather stays on Synthetic (see console for why; regenerate with tools/make_hindcast.py).')+' SST: '+(TS.hind&&TS.hind.sst&&TS.hindSST?'observed monthly means (ERSSTv5) while in real weather mode':'analytic climatology')+'.');
   const RX=C.bw/GW,ge=new Float32Array(GW*GH);for(let j=0;j<GH;j++)for(let i=0;i<GW;i++)ge[j*GW+i]=el[((j*RX+RX/2)|0)*C.bw+((i*RX+RX/2)|0)];
