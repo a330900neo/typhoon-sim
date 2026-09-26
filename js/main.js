@@ -32,15 +32,16 @@ $('zin').onclick=()=>zoomAt(W/2,H/2,1.5);$('zout').onclick=()=>zoomAt(W/2,H/2,1/
 // colormaps
 const build=st=>{const a=new Uint8Array(768);for(let k=0;k<256;k++){const f=k/255;let n=1;while(n<st.length-1&&st[n][0]<f)n++;
   const A=st[n-1],B=st[n],t=clamp((f-A[0])/(B[0]-A[0]),0,1);for(let c=0;c<3;c++)a[k*3+c]=A[1][c]+(B[1][c]-A[1][c])*t}return a};
-const L={wind:{lo:0,hi:90,u:'m/s',st:[[0,[8,16,60]],[.19,[0,170,225]],[.27,[35,205,95]],[.37,[255,235,0]],[.49,[255,120,0]],[.6,[225,15,15]],[.8,[190,0,120]],[1,[255,255,255]]]},
+const L={wind:{lo:0,hi:90,u:'m/s',gamma:.55,st:[[0,[8,16,60]],[.19,[0,170,225]],[.27,[35,205,95]],[.37,[255,235,0]],[.49,[255,120,0]],[.6,[225,15,15]],[.8,[190,0,120]],[1,[255,255,255]]]},
  pressure:{lo:900,hi:1025,u:'hPa',st:[[0,[200,60,200]],[.2,[220,40,60]],[.5,[240,200,60]],[.8,[80,200,120]],[1,[30,60,140]]]},
  humidity:{lo:0,hi:1,u:'rel. humidity',st:[[0,[190,150,90]],[.5,[110,190,190]],[.8,[40,120,200]],[1,[10,40,150]]]},
  sst:{lo:15,hi:31,u:'°C',st:[[0,[40,60,160]],[.5,[60,180,200]],[.7,[240,220,80]],[.87,[240,130,40]],[1,[200,30,40]]]},
+ precip:{lo:0,hi:90,u:'mm/h',st:[[0,[10,18,42]],[.06,[35,90,190]],[.18,[40,150,230]],[.32,[120,70,200]],[.48,[195,45,150]],[.62,[225,40,70]],[.76,[245,110,35]],[.9,[255,205,60]],[1,[255,250,225]]]},
 };
 for(const k in L)L[k].lut=build(L[k].st);
 const CAT=[[105,'Violent Typhoon','#ff2bd6'],[85,'Very Strong Typhoon','#ff3b3b'],[64,'Typhoon','#ff8a2b'],[48,'Severe Tropical Storm','#ffd23b'],[34,'Tropical Storm','#7fe06a'],[0,'Tropical Depression','#5ec8ff']];
 const cat=v=>CAT.find(c=>v*1.944>=c[0]);
-let lvU=F.u,lvV=F.v,base,layer='wind',speed=6,acc=0,last=performance.now(),fr=0,dirty=true,isoT=0,iso=[],SM;
+let lvU=F.u,lvV=F.v,base,layer='wind',speed=6,acc=0,last=performance.now(),fr=0,dirty=true,isoT=0,iso=[],SM,coast=[];
 const announced=new WeakSet();
 function announceEvents(){for(const s of S.storms.concat(S.hist))for(const e of s.ev||[]){if(announced.has(e))continue;announced.add(e);
   const name=s.name||'Storm';
@@ -48,13 +49,52 @@ function announceEvents(){for(const s of S.storms.concat(S.hist))for(const e of 
   else if(e.t==='in')toast(`${name} entered land`,true);
   else if(e.t==='out')toast(`${name} returned to sea`)} }
 const ov=document.createElement('canvas');ov.width=GW;ov.height=GH;const og=ov.getContext('2d'),oi=og.createImageData(GW,GH);
-function legend(){const l=L[layer],c=$('legend').getContext('2d');c.clearRect(0,0,220,10);if(!l){$('legtxt').textContent='';return}
-  for(let x=0;x<220;x++){const k=((x/219*255)|0)*3;c.fillStyle=`rgb(${l.lut[k]},${l.lut[k+1]},${l.lut[k+2]})`;c.fillRect(x,0,1,10)}$('legtxt').textContent=`${l.lo} → ${l.hi} ${l.u}`}
-function updOverlay(){const l=L[layer];if(!l)return;const d=oi.data;
-  for(let k=0;k<GW*GH;k++){const val=layer==='wind'?Math.hypot(lvU[k],lvV[k]):layer==='sst'?F.sst0[k]+F.sa[k]:layer==='pressure'?F.p[k]:F.q[k],
-    i=clamp(((val-l.lo)/(l.hi-l.lo)*255)|0,0,255)*3;d[k*4]=l.lut[i];d[k*4+1]=l.lut[i+1];d[k*4+2]=l.lut[i+2];
-    d[k*4+3]=layer==='sst'&&F.el[k]>0?0:150}
-  og.putImageData(oi,0,0)}
+// Precip is rendered at PS x the sim grid's own resolution: the raw field is bilinearly resampled onto a finer
+// canvas (ovPraw) instead of being nearest-neighbor-stretched, so there's real sub-cell gradient for the blur to
+// work with. ovB is the blurred, eye-punched result actually drawn to the map.
+const PS=2,PW=GW*PS,PH=GH*PS;
+const ovPraw=document.createElement('canvas');ovPraw.width=PW;ovPraw.height=PH;const ogPraw=ovPraw.getContext('2d'),oiP=ogPraw.createImageData(PW,PH);
+const ovB=document.createElement('canvas');ovB.width=PW;ovB.height=PH;const ogB=ovB.getContext('2d');   // softened/blurred copy, used for precip so it reads like radar imagery instead of raw grid cells
+const sampWind=(lon,lat)=>{let fx=(lon-C.lon0)/D-.5,fy=(C.lat1-lat)/D-.5;fx=clamp(fx,0,GW-1.001);fy=clamp(fy,0,GH-1.001);
+  const x=fx|0,y=fy|0,tx=fx-x,ty=fy-y,k=y*GW+x,U=F.lv[0],V=F.lv[1];
+  const u=(U[k]*(1-tx)+U[k+1]*tx)*(1-ty)+(U[k+GW]*(1-tx)+U[k+GW+1]*tx)*ty,
+        v=(V[k]*(1-tx)+V[k+1]*tx)*(1-ty)+(V[k+GW]*(1-tx)+V[k+GW+1]*tx)*ty;
+  return Math.hypot(u,v)};
+// Measured (not guessed) calm-center radius: walk outward from the storm's center along 8 spokes in the ACTUAL
+// surface wind grid (the same F.lv[0]/[1] the wind layer itself colors) until speed first clears a "no longer
+// calm" threshold, then average. This is what makes the precip layer's dry-eye hole agree with what the wind
+// layer shows, instead of drifting from it whenever an analytic rm-based guess over- or under-estimates.
+function windEyeRadius(s){const thresh=Math.max(10,.3*s.v),cl=Math.cos(s.lat*R);let sum=0;
+  for(let a=0;a<8;a++){const ang=a/8*2*Math.PI;let r=3;
+    for(;r<1.3*s.rm;r+=4){const lon=s.lon+r*Math.cos(ang)/(111*cl),lat=s.lat+r*Math.sin(ang)/111;
+      if(sampWind(lon,lat)>=thresh)break}
+    sum+=r}
+  return sum/8}
+function legend(){const l=L[layer],c=$('legend').getContext('2d'),gm=(l&&l.gamma)||1;c.clearRect(0,0,220,10);if(!l){$('legtxt').textContent='';return}
+  for(let x=0;x<220;x++){const f=x/219,k=((gm===1?f:Math.pow(f,gm))*255|0)*3;c.fillStyle=`rgb(${l.lut[k]},${l.lut[k+1]},${l.lut[k+2]})`;c.fillRect(x,0,1,10)}$('legtxt').textContent=`${l.lo} → ${l.hi} ${l.u}`}
+function updOverlay(){const l=L[layer];if(!l)return;const d=oi.data,gm=l.gamma||1;
+  for(let k=0;k<GW*GH;k++){const val=layer==='wind'?Math.hypot(lvU[k],lvV[k]):layer==='sst'?F.sst0[k]+F.sa[k]:layer==='pressure'?F.p[k]:layer==='precip'?F.pr[k]:F.q[k],
+    t=clamp((val-l.lo)/(l.hi-l.lo),0,1),i=((gm===1?t:Math.pow(t,gm))*255|0)*3;d[k*4]=l.lut[i];d[k*4+1]=l.lut[i+1];d[k*4+2]=l.lut[i+2];
+    d[k*4+3]=layer==='sst'&&F.el[k]>0?0:layer==='precip'?clamp(60+60*Math.sqrt(Math.max(0,val)),0,255):150}
+  og.putImageData(oi,0,0);
+  if(layer==='precip'){
+    // Bilinearly resample F.pr straight onto the PW x PH canvas (PS x finer than the sim grid) instead of
+    // reusing the nearest-neighbor GW x GH image, so the extra resolution carries real sub-cell gradient rather
+    // than just upscaled blocks.
+    const pd=oiP.data,pr=F.pr,lut=l.lut,lo0=l.lo,hi0=l.hi;
+    for(let jj=0;jj<PH;jj++){const fy=clamp(jj/PS-.5,0,GH-1.001),y0=fy|0,ty=fy-y0;
+      for(let ii=0;ii<PW;ii++){const fx=clamp(ii/PS-.5,0,GW-1.001),x0=fx|0,tx=fx-x0,k=y0*GW+x0;
+        const val=(pr[k]*(1-tx)+pr[k+1]*tx)*(1-ty)+(pr[k+GW]*(1-tx)+pr[k+GW+1]*tx)*ty,
+          ci=clamp(((val-lo0)/(hi0-lo0)*255)|0,0,255)*3,kk=(jj*PW+ii)*4;
+        pd[kk]=lut[ci];pd[kk+1]=lut[ci+1];pd[kk+2]=lut[ci+2];pd[kk+3]=clamp(60+60*Math.sqrt(Math.max(0,val)),0,255)}}
+    ogPraw.putImageData(oiP,0,0);
+    // A lighter blur is enough now: it only needs to soften the (already-smooth, bilinear) field into a
+    // continuous radar look, not hide raw grid blockiness the way it did at 1x resolution.
+    ogB.clearRect(0,0,PW,PH);ogB.filter='blur(2px)';ogB.drawImage(ovPraw,0,0);ogB.filter='none';
+    // Render-side eye punch disabled for now (was still reading bigger than the storm's real eye no matter how
+    // tightly windEyeRadius() was capped). Precip's own dry eye now comes only from carveEyes/spawnRain in
+    // sim.js - both currently off too - so for the moment the precip layer draws with no artificial hole at all.
+  }}
 // isobars via marching squares (4 hPa), segments in grid coords
 function calcIso(){const p=F.p;
   // Light 5-point smoothing purely for contouring: marching squares point-samples the field, so a single noisy
@@ -69,6 +109,8 @@ function calcIso(){const p=F.p;
       if(q.length>=4)s.push(lv,q[0],q[1],q[2],q[3]);if(q.length==8)s.push(lv,q[4],q[5],q[6],q[7])}}
   iso=s}
 const gx=x=>X(C.lon0+(x+.5)*D),gy=y=>Y(C.lat1-(y+.5)*D);
+function drawCoast(){if(!coast.length)return;g.beginPath();for(let n=0;n<coast.length;n+=4){g.moveTo(gx(coast[n]),gy(coast[n+1]));g.lineTo(gx(coast[n+2]),gy(coast[n+3]))}
+  g.lineWidth=2.2;g.strokeStyle='rgba(10,14,25,.55)';g.stroke();g.lineWidth=.9;g.strokeStyle='rgba(255,255,255,.85)';g.stroke()}
 function drawIso(){for(let pass=0;pass<2;pass++){g.beginPath();for(let n=0;n<iso.length;n+=5){if((iso[n]%20===0)!==(pass===1))continue;
     g.moveTo(gx(iso[n+1]),gy(iso[n+2]));g.lineTo(gx(iso[n+3]),gy(iso[n+4]))}
     g.strokeStyle=pass?'rgba(255,255,255,.9)':'rgba(255,255,255,.4)';g.lineWidth=pass?1.6:.8;g.stroke()}
@@ -115,6 +157,24 @@ function tracks(){if(S.hm&&TS.hind)for(const o of TS.hind.storms){if(!o.done)con
       L1=`${s.name} · ${CAB[catOf(kt)]}`,L2=`${kt|0} kt · ${s.pmin|0} hPa`,L3=`→${dir} ${sp.toFixed(0)} kt`,L4=s.land?'⚠ LANDFALL / over land':null,tx=x+r+4;let ty=y-r;
     g.fillStyle='#fff';g.strokeStyle='#000';g.lineWidth=3;
     for(const[t,col]of[[L1,'#fff'],[L2,c],[L3,'#cfe8ff'],[L4,'#ffb347']]){if(!t)continue;g.fillStyle=col;g.strokeText(t,tx,ty);g.fillText(t,tx,ty);ty+=13}}g.globalAlpha=1}
+// JMA-style wind radii: 30 kt (gale) and 50 kt (storm) wind-area circles. Walked outward along 8 spokes in the
+// ACTUAL composite surface wind field (same F.lv[0]/[1] grid the wind layer and windEyeRadius() read), so the
+// radius reflects the storm's real footprint - including motion-asymmetry (front-right quadrant runs stronger)
+// and any nearby-storm interaction - not just an analytic guess from rm/v. JMA itself issues a single circle
+// (occasionally a long/short-axis ellipse for very asymmetric storms); a spoke-averaged circle is the simple,
+// faithful equivalent here.
+const KT=.514444,TH30=30*KT,TH50=50*KT;
+function windRadii(s){const cl=Math.cos(s.lat*R);let r30=0,r50=0;const SPOKES=8,STEP=20,MAXR=900;
+  for(let a=0;a<SPOKES;a++){const ang=a/SPOKES*2*Math.PI;let last30=0,last50=0;
+    for(let r=STEP;r<MAXR;r+=STEP){const lon=s.lon+r*Math.cos(ang)/(111*cl),lat=s.lat+r*Math.sin(ang)/111,w=sampWind(lon,lat);
+      if(w>=TH30)last30=r;if(w>=TH50)last50=r}
+    r30+=last30;r50+=last50}
+  return{r30:r30/SPOKES,r50:r50/SPOKES}}
+function drawWindRadii(){for(const s of S.storms){if(s.r30==null)continue;const x=X(s.lon),y=Y(s.lat),cl=Math.cos(s.lat*R);
+  if(s.r30>15){const rx=(s.r30/(111*cl))*V.s*KX,ry=(s.r30/111)*V.s;g.save();g.strokeStyle='rgba(70,210,110,.9)';g.lineWidth=1.6;
+    g.beginPath();g.ellipse(x,y,rx,ry,0,0,2*Math.PI);g.stroke();g.restore()}
+  if(s.r50>15){const rx=(s.r50/(111*cl))*V.s*KX,ry=(s.r50/111)*V.s;g.save();g.strokeStyle='rgba(255,60,60,.9)';g.lineWidth=1.8;
+    g.beginPath();g.ellipse(x,y,rx,ry,0,0,2*Math.PI);g.stroke();g.restore()}}}
 function drawForecast(){for(const f of fcData){const trk=f.trk;if(trk.length<2)continue;
     const L=[],Rt=[];
     for(let i=0;i<trk.length;i++){const[lo,la,,km]=trk[i],p=trk[Math.max(0,i-1)],n=trk[Math.min(trk.length-1,i+1)],
@@ -130,23 +190,26 @@ function drawForecast(){for(const f of fcData){const trk=f.trk;if(trk.length<2)c
       g.beginPath();g.arc(x,y,4,0,7);g.fillStyle=c;g.strokeStyle='#fff';g.lineWidth=1.5;g.fill();g.stroke();
       if(h%24===0&&h>0){g.lineWidth=3;g.strokeStyle='#000';g.fillStyle='#fff';g.strokeText('+'+h+'h',x+6,y-6);g.fillText('+'+h+'h',x+6,y-6)}}}}
 function ui(){const d=new Date(S.t0+S.t*36e5);$('clock').textContent=`${d.toISOString().slice(0,16).replace('T',' ')}Z  (T+${S.t}h) · ${S.E.enso>.3?'El Niño':S.E.enso<-.3?'La Niña':'ENSO-neutral'} · ${S.E.mjo>.25?'active spell':S.E.mjo<-.25?'quiet spell':'near-avg activity'} · ${S.mode()}`;
-  let h=S.storms.map(s=>{const c=cat(s.v);return `<div class="st" style="border-color:${c[2]}"><b>${s.name}</b> — ${c[1]}<br>${(s.v*1.944)|0} kt (${s.v.toFixed(0)} m/s) · ${s.pmin.toFixed(0)} hPa · RMW ${s.rm.toFixed(0)} km<br>${s.lat.toFixed(1)}°N ${s.lon.toFixed(1)}°E · ${(s.spd*1.944).toFixed(0)} kt${s.land?' · <b style="color:#ffb347">LANDFALL</b>':''}${s.lf?' · '+s.lf+' landfall'+(s.lf>1?'s':''):''}${s.err!=null?' · obs err '+(s.err|0)+' km':''}</div>`}).join('');
+  let h=S.storms.map(s=>{const c=cat(s.v);return `<div class="st" style="border-color:${c[2]}"><b>${s.name}</b> — ${c[1]}<br>${(s.v*1.944)|0} kt (${s.v.toFixed(0)} m/s) · ${s.pmin.toFixed(0)} hPa · RMW ${s.rm.toFixed(0)} km${s.r30>15?` · R30 ${s.r30.toFixed(0)} km`:''}${s.r50>15?` · R50 ${s.r50.toFixed(0)} km`:''}<br>${s.lat.toFixed(1)}°N ${s.lon.toFixed(1)}°E · ${(s.spd*1.944).toFixed(0)} kt${s.land?' · <b style="color:#ffb347">LANDFALL</b>':''}${s.lf?' · '+s.lf+' landfall'+(s.lf>1?'s':''):''}${s.err!=null?' · obs err '+(s.err|0)+' km':''}</div>`}).join('');
   h+=S.hist.slice(-5).reverse().map(s=>`<div class="st" style="border-color:#556;opacity:.7">${s.name} ${s.by?'absorbed by '+s.by:'dissipated'} · peak ${(s.max*1.944)|0} kt</div>`).join('');
   $('storms').innerHTML=h||'<em>None yet — press Start Sim</em>'}
 function hover(e){if(!TS.elev0)return;const lon=LON(e.clientX),lat=LAT(e.clientY),k=S.cellIdx(lon,lat);if(k<0)return;
   const ix=Math.min(C.bw-1,Math.max(0,((lon-C.lon0)*C.bw/90)|0)),iy=Math.min(C.bh-1,Math.max(0,((C.lat1-lat)*C.bh/55)|0)),el=TS.elev0[iy*C.bw+ix],w=Math.hypot(F.u[k],F.v[k]);
-  $('hover').innerHTML=`${lat.toFixed(2)}°N ${lon.toFixed(2)}°E<br>${el>0?'Elev':'Depth'}: ${Math.abs(el)|0} m<br>Surface wind: ${w.toFixed(1)} m/s (${(w*1.944)|0} kt)<br>${[['850',2],['500',4],['200',6]].map(([n,m])=>{const u=F.lv[m][k],v=F.lv[m+1][k];return `${n} hPa: ${Math.hypot(u,v).toFixed(0)} m/s from ${((270-Math.atan2(v,u)*180/Math.PI)%360+360)%360|0}°`}).join('<br>')}<br>Pressure: ${F.p[k].toFixed(1)} hPa<br>Humidity: ${(F.q[k]*100)|0}%<br>SST: ${(F.sst0[k]+F.sa[k]).toFixed(1)} °C`}
+  $('hover').innerHTML=`${lat.toFixed(2)}°N ${lon.toFixed(2)}°E<br>${el>0?'Elev':'Depth'}: ${Math.abs(el)|0} m<br>Surface wind: ${w.toFixed(1)} m/s (${(w*1.944)|0} kt)<br>${[['850',2],['500',4],['200',6]].map(([n,m])=>{const u=F.lv[m][k],v=F.lv[m+1][k];return `${n} hPa: ${Math.hypot(u,v).toFixed(0)} m/s from ${((270-Math.atan2(v,u)*180/Math.PI)%360+360)%360|0}°`}).join('<br>')}<br>Pressure: ${F.p[k].toFixed(1)} hPa<br>Humidity: ${(F.q[k]*100)|0}%<br>Precip: ${F.pr[k].toFixed(0)} mm/h<br>SST: ${(F.sst0[k]+F.sa[k]).toFixed(1)} °C`}
 function loop(now){const dt=Math.min(.1,(now-last)/1000);last=now;
   if(S.running){acc+=dt*speed;const t0=performance.now();let n=0;
     while(acc>=1&&n<48&&performance.now()-t0<14){
       S.step();
       acc--;n++;dirty=true}
     if(acc>3)acc=3}
-  announceEvents();if(dirty){updOverlay();if(now-isoT>250){calcIso();isoT=now;dirty=false}}
+  announceEvents();if(dirty){updOverlay();if($('windrad').checked)for(const s of S.storms){const wr=windRadii(s);s.r30=wr.r30;s.r50=wr.r50}if(now-isoT>250){calcIso();isoT=now;dirty=false}}
   g.drawImage(base,0,0,C.bw,C.bh,X(C.lon0),Y(C.lat1),90*V.s*KX,55*V.s);
-  if(L[layer]){g.imageSmoothingEnabled=true;g.drawImage(ov,0,0,GW,GH,X(C.lon0),Y(C.lat1),90*V.s*KX,55*V.s)}
+  if(L[layer]){g.imageSmoothingEnabled=true;
+    if(layer==='precip')g.drawImage(ovB,0,0,PW,PH,X(C.lon0),Y(C.lat1),90*V.s*KX,55*V.s);
+    else g.drawImage(ov,0,0,GW,GH,X(C.lon0),Y(C.lat1),90*V.s*KX,55*V.s);
+    drawCoast()}
   if($('iso').checked)drawIso();const wm=$('wmode').value;if(wm==='particles')particles();else if(wm==='arrows')arrows();
-  tracks();if($('fcst').checked){if(!fcData||S.t-fcT>=3){fcData=S.forecast(120);fcT=S.t}drawForecast()}
+  tracks();if($('windrad').checked)drawWindRadii();if($('fcst').checked){if(!fcData||S.t-fcT>=3){fcData=S.forecast(120);fcT=S.t}drawForecast()}
   if(++fr%8==0)ui();requestAnimationFrame(loop)}
 $('start').onclick=()=>{S.running=!S.running;$('start').textContent=S.running?'⏸ Pause':'▶ Start Sim'};
 $('reset').onclick=()=>{S.reset();$('start').textContent='▶ Start Sim';dirty=true;ui();fcData=null;fcT=-999};
@@ -158,8 +221,13 @@ $('ptoggle').onclick=()=>$('panel').classList.toggle('hide');
 $('ttoggle').onclick=()=>{document.body.classList.add('top-hidden');$('top').classList.add('hide')};
 $('tshow').onclick=()=>{document.body.classList.remove('top-hidden');$('top').classList.remove('hide')};addEventListener('resize',resize);
 S.t0=Date.parse($('date').value+'T00:00:00Z');resize();V.s=minS();fixV();
-TS.loadTerrain(p=>$('loading').textContent=`Loading terrain… ${(p*100)|0}%`).then(async el=>{await TS.loadClim('js/clim.bin');await TS.loadStats('js/stats.json');await TS.loadHind('js/hind.bin','js/hind.json');if(TS.hind)await TS.loadHindSST('js/hind_sst.bin');$('wx').disabled=!TS.hind;document.querySelector('.note').insertAdjacentHTML('beforeend','<br>Mean flow: '+(TS.clim?'reanalysis climatology':'analytic (run tools/make_clim.py)')+'; anomalies: barotropic model.'+(TS.stats?' Genesis from IBTrACS.':'')+(TS.hind?' Hindcast window: '+TS.hind.start+' + '+TS.hind.days+' d (dates outside it fall back to climatology + stochastic genesis).':' No hindcast loaded — Weather stays on Synthetic (see console for why; regenerate with tools/make_hindcast.py).')+' SST: '+(TS.hind&&TS.hind.sst&&TS.hindSST?'observed monthly means (ERSSTv5) while in real weather mode':'analytic climatology')+'.');
+TS.loadTerrain(p=>$('loading').textContent=`Loading terrain… ${(p*100)|0}%`).then(async el=>{await TS.loadClim('js/clim.bin');await TS.loadClimRH('js/clim_rh.bin');await TS.loadStats('js/stats.json');await TS.loadHind('js/hind.bin','js/hind.json');if(TS.hind){await TS.loadHindSST('js/hind_sst.bin');if(TS.hind.rh)await TS.loadHindRH('js/hind_rh.bin')}$('wx').disabled=!TS.hind;document.querySelector('.note').insertAdjacentHTML('beforeend','<br>Mean flow: '+(TS.clim?'reanalysis climatology':'analytic (run tools/make_clim.py)')+'; anomalies: barotropic model.'+(TS.stats?' Genesis from IBTrACS.':'')+(TS.hind?' Hindcast window: '+TS.hind.start+' + '+TS.hind.days+' d (dates outside it fall back to climatology + stochastic genesis).':' No hindcast loaded — Weather stays on Synthetic (see console for why; regenerate with tools/make_hindcast.py).')+' SST: '+(TS.hind&&TS.hind.sst&&TS.hindSST?'observed monthly means (ERSSTv5) while in real weather mode':'analytic climatology')+'. Humidity: '+(TS.hind&&TS.hind.rh&&TS.hindRH?'observed daily means (NCEP/NCAR) while in real weather mode':TS.climRH?'reanalysis climatology + evolving anomaly':'analytic fallback (run tools/make_clim.py)')+'.');
   const RX=C.bw/GW,ge=new Float32Array(GW*GH);for(let j=0;j<GH;j++)for(let i=0;i<GW;i++)ge[j*GW+i]=el[((j*RX+RX/2)|0)*C.bw+((i*RX+RX/2)|0)];
+  {const cs=[];for(let j=0;j<GH-1;j++)for(let i=0;i<GW-1;i++){const k=j*GW+i,a=ge[k],b=ge[k+1],c=ge[k+GW+1],d=ge[k+GW],mn=Math.min(a,b,c,d),mx=Math.max(a,b,c,d);
+    if(mn<0&&mx>=0){const q=[],e=(v1,v2,x1,y1,x2,y2)=>{if((v1<0)!==(v2<0)){const t=(0-v1)/(v2-v1);q.push(x1+(x2-x1)*t,y1+(y2-y1)*t)}};
+      e(a,b,i,j,i+1,j);e(b,c,i+1,j,i+1,j+1);e(d,c,i,j+1,i+1,j+1);e(a,d,i,j,i,j+1);
+      if(q.length>=4)cs.push(q[0],q[1],q[2],q[3]);if(q.length==8)cs.push(q[4],q[5],q[6],q[7])}}
+   coast=cs}
   base=TS.buildBase(el);S.init(ge);legend();ui();
   if(TS.tilesOk)$('loading').style.display='none';else $('loading').textContent='Could not load elevation tiles (offline?). Reload to retry.';
   $('start').disabled=$('reset').disabled=false;requestAnimationFrame(loop)});

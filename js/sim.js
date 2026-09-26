@@ -19,7 +19,7 @@ const C=TS.cfg,GW=C.gw,GH=C.gh,N=GW*GH,D=(C.lon1-C.lon0)/GW,R=Math.PI/180,
 const S=TS.sim={storms:[],hist:[],t:0,t0:Date.UTC(2026,7,10),running:false,nextSpawn:0,uid:0,E:null,wx:'synth'};
 // F.lv = [sfcU,sfcV,u850,v850,u500,v500,u200,v200]
 const F=S.F={lv:Array.from({length:8},()=>new Float32Array(N)),p:new Float32Array(N),q:new Float32Array(N),
- q2:new Float32Array(N),sst0:new Float32Array(N),sa:new Float32Array(N),el:null};
+ q2:new Float32Array(N),sst0:new Float32Array(N),sa:new Float32Array(N),pr:new Float32Array(N),el:null};
 F.u=F.lv[0];F.v=F.lv[1];
 const NAMES=['Haishen','Noul','Dolphin','Kujira','Chan-hom','Linfa','Nangka','Saudel','Molave','Goni','Vamco','Krovanh','Dujuan','Surigae','Choi-wan','Koguma','Champi','In-fa','Cempaka','Nepartak','Lupit','Mirinae','Nida','Omais','Conson','Chanthu','Dianmu','Mindulle','Lionrock','Kompasu'];
 // Genesis starts as an unnamed invest (JTWC-style 90W..99W numbering); a real name is only assigned once the
@@ -56,7 +56,9 @@ const CW=91,CH=56,NC=CW*CH,CG=Array.from({length:8},()=>new Float32Array(NC)),CP
 const bil=(a,fx,fy)=>{fx=clamp(fx,0,CW-1.001);fy=clamp(fy,0,CH-1.001);const x=fx|0,y=fy|0,tx=fx-x,ty=fy-y,k=y*CW+x;
   return(a[k]*(1-tx)+a[k+1]*tx)*(1-ty)+(a[k+CW]*(1-tx)+a[k+CW+1]*tx)*ty};
 const cs=(m,lon,lat)=>bil(CG[m],lon-C.lon0,C.lat1-lat);
-const MU=[0,1,2].map(()=>new Float32Array(NC)),MV=[0,1,2].map(()=>new Float32Array(NC)),PM=new Float32Array(NC),ZX=new Float64Array(NC),ZY=new Float64Array(NC),
+const MU=[0,1,2].map(()=>new Float32Array(NC)),MV=[0,1,2].map(()=>new Float32Array(NC)),
+  CRH=[0,1].map(()=>new Float32Array(NC)),   // climatological RH background (850/700 hPa, coarse grid), from js/clim_rh.bin - level 0=850 (low-level), 1=700 (mid-level, Gray's genesis parameter)
+  PM=new Float32Array(NC),ZX=new Float64Array(NC),ZY=new Float64Array(NC),
   ZP=new Float64Array(NC),PP=new Float64Array(NC),T1=new Float64Array(NC),Z1=new Float64Array(NC),Z2=new Float64Array(NC),
   rc=new Float64Array(CH),rN=new Float64Array(CH),rS=new Float64Array(CH),den=new Float64Array(CH);
 for(let j=0;j<CH;j++){const lat=C.lat1-j;rc[j]=Math.cos(lat*R);rN[j]=Math.cos((lat+.5)*R);rS[j]=Math.cos((lat-.5)*R);den[j]=2/(rc[j]*rc[j])+(rN[j]+rS[j])/rc[j]}
@@ -64,6 +66,10 @@ TS.loadClim=async url=>{try{const r=await fetch(url,{cache:'no-store'});if(!r.ok
   const b=new Int16Array(await r.arrayBuffer());const want=12*3*2*NC;
   if(b.length!==want){console.warn('loadClim: size mismatch, got',b.length,'ints, expected',want,'(check js/clim.bin was rebuilt for this grid)');return false}
   TS.clim=b;return true}catch(e){console.warn('loadClim: error',e);return false}};   // layout: [month12][level 850/500/200][u,v][CH][CW], 0.01 m/s
+TS.loadClimRH=async url=>{try{const r=await fetch(url,{cache:'no-store'});if(!r.ok){console.warn('loadClimRH: HTTP',r.status,url);return false}
+  const b=new Int16Array(await r.arrayBuffer());const want=12*2*NC;
+  if(b.length!==want){console.warn('loadClimRH: size mismatch, got',b.length,'ints, expected',want,'(check js/clim_rh.bin was rebuilt for this grid)');return false}
+  TS.climRH=b;return true}catch(e){console.warn('loadClimRH: error',e);return false}};   // layout: [month12][level 850/700][CH][CW], RH % x100 - real background moisture (monsoon trough/ridge pattern), see tools/make_clim.py
 TS.tune=TS.tune||{rate:1.4};            // rate: multiplier on observed named-storm genesis rate (sim storms often fail to reach 34 kt)
 TS.loadStats=async url=>{try{const r=await fetch(url,{cache:'no-store'});if(!r.ok){console.warn('loadStats: HTTP',r.status,url);return false}TS.stats=await r.json();return true}catch(e){console.warn('loadStats: error',e);return false}};   // js/stats.json from tools/make_stats.py
 TS.loadHind=async(bu,ju)=>{try{const[a,b]=await Promise.all([fetch(bu,{cache:'no-store'}),fetch(ju,{cache:'no-store'})]);if(!a.ok||!b.ok){console.warn('loadHind: HTTP',a.status,bu,'/',b.status,ju);return false}
@@ -72,6 +78,8 @@ TS.loadHind=async(bu,ju)=>{try{const[a,b]=await Promise.all([fetch(bu,{cache:'no
   TS.hind={...j,t0:Date.parse(j.start+'T00:00:00Z'),data:d};return true}catch(e){console.warn('loadHind: error',e);return false}};   // js/hind.bin+json from tools/make_hindcast.py
 TS.loadHindSST=async url=>{try{const r=await fetch(url,{cache:'no-store'});if(!r.ok){console.warn('loadHindSST: HTTP',r.status,url);return false}
   TS.hindSST={data:new Int16Array(await r.arrayBuffer())};return true}catch(e){console.warn('loadHindSST: error',e);return false}};   // js/hind_sst.bin: real monthly-mean SST (ERSSTv5); month0/year0/n metadata lives in hind.json's "sst" field
+TS.loadHindRH=async url=>{try{const r=await fetch(url,{cache:'no-store'});if(!r.ok){console.warn('loadHindRH: HTTP',r.status,url);return false}
+  TS.hindRH={data:new Int16Array(await r.arrayBuffer())};return true}catch(e){console.warn('loadHindRH: error',e);return false}};   // js/hind_rh.bin: real daily-mean RH (NCEP/NCAR) at 850/700 hPa, same day axis as hind.bin/hind.json
 // Real-weather mode is only active while the simulated date lies inside the reanalysis window that was loaded. If the chosen start date
 // is outside it (e.g. a future date), or the data runs out mid-run, the sim falls back to climatology + stochastic genesis instead of
 // sitting there with genesis disabled.
@@ -98,6 +106,14 @@ function realSST(lon,lat){const M=TS.hind&&TS.hind.sst,D=TS.hindSST&&TS.hindSST.
     i0=clamp(mIdx,0,M.n-1),i1=clamp(mIdx+1,0,M.n-1),fx=lon-C.lon0,fy=C.lat1-lat,
     a=bil(D.subarray(i0*NC,i0*NC+NC),fx,fy)*.01,b=bil(D.subarray(i1*NC,i1*NC+NC),fx,fy)*.01;
   return a+(b-a)*f}
+// Real RH for the exact simulated day (NCEP/NCAR daily means, time-interpolated), used as the background moisture
+// field in place of climatology while hindcast free-run/replay is active - the actual monsoon trough position and
+// actual dry intrusions for that real day, not just a monthly-mean or synthetic proxy. lvl: 0=850 hPa, 1=700 hPa.
+function realRH(lon,lat,lvl){const H=TS.hind,D=TS.hindRH&&TS.hindRH.data;if(!H||!D)return null;
+  const x=clamp((S.t0+S.t*36e5-H.t0)/864e5-.5,0,H.days-1.001),d0=x|0,f=x-d0,fx=lon-C.lon0,fy=C.lat1-lat,
+    o0=(d0*2+lvl)*NC,o1=(clamp(d0+1,0,H.days-1)*2+lvl)*NC,
+    a=bil(D.subarray(o0,o0+NC),fx,fy)*.0001,b=bil(D.subarray(o1,o1+NC),fx,fy)*.0001;
+  return a+(b-a)*f}
 function obsAt(o,t){const T=o.T,n=T.length;if(t<T[0]||t>T[n-1])return null;let i=1;while(i<n-1&&T[i]<t)i++;
   const f=(t-T[i-1])/(T[i]-T[i-1]||1),p=o.trk[i-1],q=o.trk[i];return[p[1]+(q[1]-p[1])*f,p[2]+(q[2]-p[2])*f,p[3]+(q[3]-p[3])*f]}
 function hindSpawn(){for(const o of TS.hind.storms){if(o.done||o.T[0]>S.t||o.T[o.T.length-1]<S.t)continue;o.done=true;
@@ -117,11 +133,13 @@ function evalMean(lon,lat){const h=.25,cl=Math.cos(lat*R),E=S.E,sn=E.sn;
   for(let m=0;m<3;m++){LV[2+2*m]=-(PN[m]-PS[m])/(2*h)+Z[m];LV[3+2*m]=(PE[m]-PW[m])/(2*h)/cl}
   bp=1010+5*Math.exp(-(((lat-E.ry)/6)**2))+.06*P0[0]-3*Math.exp(-(((lat-E.mty)/5)**2))-5*sg((lat-45)/5)}
 function meanField(){const E=S.E,c=clim(E.sn,E.enso);E.rx=c.rx;E.ry=c.ry;E.ra=c.ra;E.jl=c.jl;E.mtx=c.mtx+E.mo;E.mty=c.mty;
-  let m0=0,m1=0,fr=0;if(TS.clim){const x=(doyOf(S.t)-1)/365.25*12-.5;m0=((Math.floor(x)%12)+12)%12;m1=(m0+1)%12;fr=x-Math.floor(x)}
+  const x=(doyOf(S.t)-1)/365.25*12-.5,m0=((Math.floor(x)%12)+12)%12,m1=(m0+1)%12,fr=x-Math.floor(x);   // calendar month index, used by both the wind and RH climatologies below
   for(let gy=0;gy<CH;gy++)for(let gx=0;gx<CW;gx++){const k=gy*CW+gx;evalMean(C.lon0+gx,C.lat1-gy);PM[k]=bp;
     for(let l=0;l<3;l++){if(TS.clim){const B=TS.clim,o0=((m0*3+l)*2)*NC+k,o1=((m1*3+l)*2)*NC+k;
         MU[l][k]=.01*(B[o0]*(1-fr)+B[o1]*fr);MV[l][k]=.01*(B[o0+NC]*(1-fr)+B[o1+NC]*fr)}
-      else{MU[l][k]=LV[2+2*l];MV[l][k]=LV[3+2*l]}}}
+      else{MU[l][k]=LV[2+2*l];MV[l][k]=LV[3+2*l]}}
+    for(let l=0;l<2;l++){if(TS.climRH){const B=TS.climRH,o0=(m0*2+l)*NC+k,o1=(m1*2+l)*NC+k;CRH[l][k]=.0001*(B[o0]*(1-fr)+B[o1]*fr)}
+      else CRH[l][k]=clamp(.5+.15*Math.exp(-((( C.lat1-gy-(E.mty+2))/9)**2)),.25,.85)}}   // fallback if clim_rh.bin isn't loaded: a mild moist band near the mean monsoon-trough latitude instead of a flat value
   const Zb=new Float64Array(NC);                                  // mean 500 hPa relative vorticity -> its gradient
   for(let j=1;j<CH-1;j++)for(let i=1;i<CW-1;i++){const k=j*CW+i,c=rc[j];
     Zb[k]=((MV[1][k+1]-MV[1][k-1])-(MU[1][k-CW]*rc[j-1]-MU[1][k+CW]*rc[j+1]))/(2*R*AE*c)}
@@ -155,20 +173,22 @@ function steer(lon,lat,vs){const A=[0,0,0,0,0,0];for(const[dx,dy]of RING)for(let
     w=Math.max(clamp((vs-8)/40,0,1),ridge)*(1-clamp(sh/30,0,.6));
   return{u:(1-w)*(.55*a+.45*c)+w*(.25*a+.4*c+.35*e),v:(1-w)*(.55*b+.45*d)+w*(.25*b+.4*d+.35*f),shear:sh}}
 
-const BL=Array.from({length:8},()=>new Float32Array(N)),BP=new Float32Array(N),FR=new Float32Array(N);let bgOk=false;
+const BL=Array.from({length:8},()=>new Float32Array(N)),BP=new Float32Array(N),FR=new Float32Array(N),
+  BQ=[0,1].map(()=>new Float32Array(N));   // background RH target on the fine grid (0=850hPa,1=700hPa): real hindcast day > climatology+synoptic-anomaly nudge > flat fallback
+let bgOk=false;
 const ELS=new Float32Array(N);                                          // 1.75°-box-smoothed elevation for terrain blocking
 S.init=function(el){F.el=el;const t=new Float32Array(N),r=Math.round(3*GS),w=2*r+1;
   for(let j=0;j<GH;j++)for(let i=0;i<GW;i++){let a=0;for(let d=-r;d<=r;d++)a+=Math.max(0,el[j*GW+clamp(i+d,0,GW-1)]);t[j*GW+i]=a/w}
   for(let j=0;j<GH;j++)for(let i=0;i<GW;i++){let a=0;for(let d=-r;d<=r;d++)a+=t[clamp(j+d,0,GH-1)*GW+i];ELS[j*GW+i]=a/w}
   S.reset()};
-S.reset=function(){S.storms=[];S.hist=[];S.t=0;S.running=false;S.hm=S.wx!=='synth'&&!!TS.hind&&S.t0>=TS.hind.t0&&S.t0<=winEnd();S.hOff=false;bgOk=false;F.sa.fill(0);ZP.fill(0);PP.fill(0);investN=90;nameSeq=0;
+S.reset=function(){S.storms=[];S.hist=[];S.t=0;S.running=false;S.hm=S.wx!=='synth'&&!!TS.hind&&S.t0>=TS.hind.t0&&S.t0<=winEnd();S.hOff=false;bgOk=false;F.sa.fill(0);ZP.fill(0);PP.fill(0);investN=90;nameSeq=0;rPN=0;
   const sn=seas(0),en=clamp(rn()*.6,-1,1);        // en>0 El Niño (ridge retreats east, genesis shifts east), <0 La Niña
   S.E={sn,enso:en,mo:rn()*4,rx:0,ry:0,ra:1,jl:0,mtx:0,mty:0,mjo:0};meanField();
   if(hindOn()){hindInit();loadAna();ZP.set(ZA)}                        // start from the observed 500 hPa anomaly
   else{for(let n=0;n<8;n++)force();for(let n=0;n<4;n++){blob(94+Math.random()*60,12+Math.random()*30,7,(Math.random()<.5?-1:1)*3e-5)}
     for(let h=0;h<96;h++){S.E.sn=sn;force();dyn()}}                     // spin-up so waves/troughs already exist at T+0
-  composeCG();setSST(sn);S.nextSpawn=hindOn()?1e9:S.t+gap(true);if(hindOn())hindSpawn();
-  for(let k=0;k<N;k++)F.q[k]=F.el[k]>0?.45:clamp(.3+.045*(F.sst0[k]-20),.25,.9);fields()};
+  composeCG();setSST(sn);bgField();S.nextSpawn=hindOn()?1e9:S.t+gap(true);if(hindOn())hindSpawn();
+  for(let k=0;k<N;k++)F.q[k]=BQ[0][k];fields();precip()};
 // Genesis: rejection-sampled from SST, low shear, latitude, monsoon-trough proximity and ENSO-shifted longitude.
 // Local relative vorticity of the actual simulated 850 hPa flow (climatological mean + evolving anomaly) at a point.
 // Real cyclogenesis happens inside pre-existing tropical waves/monsoon-trough disturbances, not on the open, undisturbed
@@ -305,11 +325,19 @@ function upd(s){const k=cellIdx(s.lon,s.lat);if(k<0)return kill(s);
   else if(s.decay){s.decay++;if(s.decay>=18)kill(s)}}
 function kill(s){S.storms=S.storms.filter(x=>x!==s);S.hist.push(s);if(S.hist.length>12)S.hist.shift()}
 function bgField(){
-    const el=F.el;for(let j=0;j<GH;j++)for(let i=0;i<GW;i++){const k=j*GW+i,fx=(i+.5)*D,fy=(j+.5)*D,x=fx|0,y=fy|0,tx=fx-x,ty=fy-y,a=y*CW+x,
+    const el=F.el,useRealRH=hindOn()&&TS.hindRH;
+    for(let j=0;j<GH;j++)for(let i=0;i<GW;i++){const k=j*GW+i,fx=(i+.5)*D,fy=(j+.5)*D,x=fx|0,y=fy|0,tx=fx-x,ty=fy-y,a=y*CW+x,
     w0=(1-tx)*(1-ty),w1=tx*(1-ty),w2=(1-tx)*ty,w3=tx*ty,lon=C.lon0+fx,lat=C.lat1-fy;
     FR[k]=el[k]>0?Math.max(.45,.8-el[k]/12000):1;
     for(let m=0;m<8;m++){const c=CG[m];BL[m][k]=(c[a]*w0+c[a+1]*w1+c[a+CW]*w2+c[a+CW+1]*w3)*(m<2?FR[k]:1)}
-    BP[k]=(CP[a]*w0+CP[a+1]*w1+CP[a+CW]*w2+CP[a+CW+1]*w3)-(el[k]>0?2.5+(lon<125&&lat>20?4:0):0)}bgOk=true}
+    BP[k]=(CP[a]*w0+CP[a+1]*w1+CP[a+CW]*w2+CP[a+CW+1]*w3)-(el[k]>0?2.5+(lon<125&&lat>20?4:0):0);
+    // background RH target: real hindcast day when available; otherwise climatology nudged by the evolving 500 hPa
+    // vorticity anomaly (a transient trough/ridge moistens/dries on top of the climatological mean, the same
+    // anomaly field the winds and isobars already show) - either way this replaces the old SST-only proxy.
+    const zv=ZP[a]*w0+ZP[a+1]*w1+ZP[a+CW]*w2+ZP[a+CW+1]*w3;
+    for(let l=0;l<2;l++){const rv=useRealRH?realRH(lon,lat,l):null,cl=CRH[l],base=cl[a]*w0+cl[a+1]*w1+cl[a+CW]*w2+cl[a+CW+1]*w3;
+      BQ[l][k]=clamp(rv!=null?rv:base+clamp(zv*6e4,-.12,.12),.15,.97)}}
+    bgOk=true}
 function fields(){const{u,v,p,q,lv}=F;if(!bgOk||S.t%6===0)bgField();for(let m=0;m<8;m++)lv[m].set(BL[m]);p.set(BP);
   for(const s of S.storms){const cl=Math.cos(s.lat*R),dl=12.6/cl,i0=Math.max(0,Math.floor((s.lon-dl-C.lon0)/D)),i1=Math.min(GW-1,Math.ceil((s.lon+dl-C.lon0)/D)),
     j0=Math.max(0,Math.floor((C.lat1-s.lat-12.6)/D)),j1=Math.min(GH-1,Math.ceil((C.lat1-s.lat+12.6)/D));
@@ -318,24 +346,211 @@ function fields(){const{u,v,p,q,lv}=F;if(!bgOk||S.t%6===0)bgField();for(let m=0;
     const x=Math.pow(s.rm/r,1.4),vt=s.v*Math.sqrt(x*Math.exp(1-x))*Math.exp(-((r/900)**2)),tr=.4*Math.exp(-((r/500)**2)),f=FR[k],tu=-vt*dy/r,tv=vt*dx/r;
     u[k]+=(tu-.3*vt*dx/r+tr*s.mu)*f;v[k]+=(tv-.3*vt*dy/r+tr*s.mv)*f;p[k]-=(1010-s.pmin)*(1-Math.exp(-x));
     lv[2][k]+=tu;lv[3][k]+=tv;lv[4][k]+=tu*.45;lv[5][k]+=tv*.45;lv[6][k]-=tu*.2;lv[7][k]-=tv*.2;   // cyclone at 850, weak at 500, outflow anticyclone at 200
-    // moisture: convective core moistens; the compensating subsidence in the storm's OWN secondary circulation dries an
-    // annulus around it (real TC structure - the dry moat just outside the eyewall). That annulus reaches out to
-    // ~800-1000+ km, so two storms at typical binary/companion separations will each dry out the shared air the
-    // other would otherwise draw on - genuine moisture competition arising from each storm's own physics, not a
-    // bolt-on distance penalty.
-    const moist=Math.exp(-((r/(1.4*s.rm))**2)),dry=Math.max(0,Math.exp(-((r/900)**2))-Math.exp(-((r/220)**2)));
-    q[k]+=(.95-q[k])*.05*moist-q[k]*.03*dry}}}}
-function humidity(){const{u,v,q,q2,el,sst0,sa}=F;
+    // moisture: convective core moistens (eyewall + spiral rainbands); the compensating subsidence in the storm's
+    // OWN secondary circulation dries an annulus around it (real TC structure - the dry moat just outside the
+    // eyewall). That annulus reaches out to ~800-1000+ km, so two storms at typical binary/companion separations
+    // will each dry out the shared air the other would otherwise draw on - genuine moisture competition arising
+    // from each storm's own physics, not a bolt-on distance penalty.
+    // Once a storm is organized/intense enough to have earned a real eye, that eye is itself dry and subsiding -
+    // real TCs are saturated in the eyewall ring, not moist all the way to the center. eyeStrength ramps up from
+    // ~TS strength to a clear eye by the low end of typhoon strength; weak/disorganized systems keep the old
+    // filled (moist all the way to the center) profile, since they don't have a real eye to hollow out.
+    const fill=Math.exp(-((r/(1.4*s.rm))**2)),eyeStrength=clamp((s.v-23)/27,0,1),eye=eyeStrength*Math.exp(-((r/(.32*s.rm))**2)),
+      dry=Math.max(0,Math.exp(-((r/900)**2))-Math.exp(-((r/220)**2)));
+    q[k]+=(.95-q[k])*.05*Math.max(0,fill-.9*eye)-q[k]*(.03*dry+.05*eye)}}}}
+function humidity(){const{u,v,q,q2,el}=F;
   for(let j=0;j<GH;j++){const lat=C.lat1-(j+.5)*D,ck=D*111,cx=ck*Math.cos(lat*R);
    for(let i=0;i<GW;i++){const k=j*GW+i,x=clamp(i-u[k]*3.6/cx,0,GW-2.001),y=clamp(j+v[k]*3.6/ck,0,GH-2.001),
      x0=x|0,y0=y|0,fx=x-x0,fy=y-y0,a=y0*GW+x0;
     let val=(q[a]*(1-fx)+q[a+1]*fx)*(1-fy)+(q[a+GW]*(1-fx)+q[a+GW+1]*fx)*fy;
-    if(el[k]>0){val+=(.4-val)*.02;if(el[k]>300)val-=.02*clamp(el[k]/2000,0,1)*Math.hypot(u[k],v[k])/10}
-    else val+=(clamp(.3+.045*(sst0[k]+sa[k]-20),.25,.92)-val)*.05;
+    // Background target is now BQ[0] (850 hPa): real hindcast RH when in real-weather mode, else RH climatology
+    // nudged by the evolving vorticity anomaly (see bgField()) - carries the real monsoon-trough/ridge and
+    // land moisture pattern instead of the old SST-only proxy. Relaxation is slower than before so storm-advected
+    // moisture plumes and dry moats persist for hours instead of snapping back to the background immediately.
+    const tgt=BQ[0][k];
+    if(el[k]>0){val+=(tgt-val)*.03;if(el[k]>300)val-=.02*clamp(el[k]/2000,0,1)*Math.hypot(u[k],v[k])/10}   // still extra-dry on high terrain (thinner boundary layer, rain-shadow)
+    else val+=(tgt-val)*.035;
     q2[k]=clamp(val,.05,1)}}
   F.q=q2;F.q2=q}
+// ---------------- precipitation (diagnostic, mm/h) ----------------
+// Background convective rain from how saturated the (already-advected) moisture field is - this is what paints
+// the monsoon trough/ITCZ as a broad rainy band and the subtropical ridge as dry, same q field humidity() just
+// updated. Orographic term adds the extra rain wrung out where the low-level flow is forced up a slope (and by
+// omission leaves the leeward side a rain shadow) - same terrain data terrain.js/upd() already use.
+//
+// A storm's OWN rain is no longer a fixed radial mask re-painted from scratch every frame. Instead it's a swarm of
+// Lagrangian rain parcels: they are BORN near the eyewall/spiral bands (rejection-sampled with the same shape real
+// TC rainfall has - a compact core peaking at the radius of max wind, a dry eye, 2-armed log-spiral bands, a
+// downshear-left bias), then ridden by the ACTUAL wind - the average of the surface flow and 850 hPa (the same
+// fields the storm's own spiral inflow/tangential wind/outflow are already painted into) - so the rain visibly
+// streams, curls and lags the flow instead of being re-stamped in place every step. A parcel fades (dry air, old
+// age) or, having spiralled back in on the low-level inflow, is finally swallowed once it reaches the core again -
+// born at the storm, carried by its wind, reabsorbed at the storm: a genuine recycling loop, not a static mask.
+const RPMAX=20000,RP_R=2,RP_S=4;                        // deposit-kernel radius (cells) & spread pulled well back down - the band's width/curl is now shaped explicitly above, so the old wide kernel + blur was piling on top of that and ballooning everything (core included) far past its intended size
+const rLon=new Float32Array(RPMAX),rLat=new Float32Array(RPMAX),rAmt=new Float32Array(RPMAX),rAge=new Float32Array(RPMAX),PRT=new Float32Array(N);
+let rPN=0;
+const sampG=(a,lon,lat)=>{let fx=(lon-C.lon0)/D-.5,fy=(C.lat1-lat)/D-.5;fx=clamp(fx,0,GW-1.001);fy=clamp(fy,0,GH-1.001);
+  const x=fx|0,y=fy|0,tx=fx-x,ty=fy-y,k=y*GW+x;
+  return(a[k]*(1-tx)+a[k+1]*tx)*(1-ty)+(a[k+GW]*(1-tx)+a[k+GW+1]*tx)*ty};
+function rAdd(lon,lat,amt){const i=rPN<RPMAX?rPN++:(Math.random()*RPMAX)|0;   // pool full -> recycle a random slot rather than growing further
+  rLon[i]=lon;rLat[i]=lat;rAmt[i]=amt;rAge[i]=0}
+// Birth: the core/eyewall ring is still a light rejection-sampled fill (a handful of random points reads fine
+// over a small, roughly-circular area). Feeder bands are NOT rejection-sampled any more - randomly accepting or
+// rejecting points scattered over the whole disc left gaps of well over 100 km between hits along any one arm,
+// which is exactly what read as "broken/scattered" instead of a band, no matter how the accept odds or the
+// after-the-fact blur radius were tuned. Instead, each band is walked DETERMINISTICALLY along its own exact
+// log-spiral curve (ang as a function of r - the same relation the old code only used to test closeness): a
+// point is dropped every DR km the whole way out, so consecutive seeds are always a short, fixed distance apart
+// and the arm is unbroken by construction. Intensity (core/far/downshear-bias) still shapes how much rain each
+// step deposits, and a small jitter plus the wind advection in the ride phase below keep the result looking like
+// organic weather rather than a drafting-compass curve, but the LINE ITSELF no longer depends on random luck.
+function spawnRain(){for(const s of S.storms){if(s.decay)continue;
+  const eyeStrength=clamp((s.v-18)/22,0,1),peak=9+100*clamp((s.v-15)/50,0,1),
+    // The dynamical RMW (s.rm) barely contracts with intensity (it's shared with steering/wind-field code that
+    // needs its own tuning), so anchoring the rain ring directly at s.rm left a huge, essentially rain-free gap
+    // between the small fixed-radius centerRain patch and the eyewall for any strong storm. rw contracts the RAIN
+    // profile only, in step with eye maturity (eyeStrength, already 0->1 as the storm develops a real eye) - a
+    // mature intense storm's visible eyewall pulls in toward the centre the way a real one does; s.rm itself,
+    // and everything else that reads it, is untouched.
+    rw=s.rm*(1-.55*eyeStrength),
+    // Stronger storms get MORE distinct feeder bands (real major typhoons commonly show 2-3 spiral arms wrapped
+    // around a well-organized core, not just one), and a thicker/more robust core convective ring (a wider CDO),
+    // while weak/moderate storms keep a single thin arm and a tight core - matStr keeps climbing well past where
+    // eyeStrength saturates (v=40) so the strongest super typhoons still gain bands other storms don't.
+    matStr=clamp((s.v-20)/40,0,1),nBands=1+Math.round(2*matStr),
+    wallFrac=.22+.24*eyeStrength,                        // core/eyewall ring thickness grows with intensity: .22*rw (weak) up to .46*rw (mature intense)
+    shu=cs(6,s.lon,s.lat)-cs(2,s.lon,s.lat),shv=cs(7,s.lon,s.lat)-cs(3,s.lon,s.lat),
+    biasAng=Math.atan2(shv,shu)+Math.PI/2,          // downshear-left quadrant: climatological TC rainfall maximum (NH)
+    cl=Math.cos(s.lat*R),
+    nCore=Math.max(4,Math.round(peak/3));
+  for(let a=0;a<nCore;a++)for(let tries=0;tries<6;tries++){
+    const r=Math.max(1,Math.random()*1.15*rw),ang=Math.random()*2*Math.PI,x=Math.pow(rw/r,1.4),core=Math.sqrt(x*Math.exp(1-x)),
+      wallR=(r-rw)/(wallFrac*rw),wall=Math.exp(-(wallR*wallR)),
+      w=core*.9+eyeStrength*wall*1.3;
+    if(Math.random()<w/1.1){rAdd(s.lon+r*Math.cos(ang)/(111*cl),s.lat+r*Math.sin(ang)/111,peak*Math.max(.3,w)*(.7+.5*Math.random()));break}}
+  const RMIN=Math.max(8,rw*.85),RMAX=850,DR=20;   // km spacing along each arm's curve - reach pulled in from 1350 to 850 km, a more realistic total rain-shield radius
+  for(let bnd=0;bnd<nBands;bnd++){const phase=bnd*(2*Math.PI/nBands);
+    for(let r=RMIN;r<=RMAX;r+=DR){
+      // Winding rate is no longer one constant for the whole arm. Real tangential wind is close to solid-body
+      // rotation inside the RMW and decays outside it, so the ANGULAR speed a parcel of air (and the band riding
+      // it) sweeps through is fast near the core and slack far out - a single fixed pitch made every band spin as
+      // one rigid rod, same rate at 50 km and 1000 km, which is why it read as an oversized, too-uniform sheet.
+      // wind(r) sets the spiral's pitch (tight near the core, loose far out); omega(r) makes that same falloff
+      // apply to how fast the pattern rotates in TIME, so the inner curl visibly winds up faster hour to hour
+      // than the outer reach of the same arm.
+      // Sign matters too: this storm's tangential flow is counterclockwise (spin advances the angle forward in
+      // time), and air spiraling INTO a counterclockwise vortex sweeps CLOCKWISE as you trace it outward from the
+      // centre - the classic NH pinwheel look. That trailing shape needs a NEGATIVE pitch here; the old constant
+      // +1.15 wound the opposite way, which is what made the whole thing look mirrored/off.
+      const wind=-(0.5+1.3*rw/(rw+r*.55)),
+        omega=-.17*clamp(1.7*rw/(rw+r),.2,1.7),
+        angC=phase-omega*S.t+wind*Math.log(r/rw),
+        // Width has to be pinned to a roughly constant distance in km, NOT a fixed number of degrees - a fixed
+        // degree width times a growing radius is exactly a wedge that gets wider forever, which is what was
+        // actually making the whole thing balloon into an oversized pie-slice at long range. Capping the km width
+        // (and keeping the cap itself modest) instead keeps the arm reading as a slim ribbon all the way out.
+        halfWkm=Math.min(38,12+26*r/500),
+        halfW=halfWkm/r;
+      for(let sub=0;sub<3;sub++){
+        const off=(sub/2-.5)*2*halfW,taper=Math.cos(clamp(off/halfW,-1,1)*Math.PI/2)**2,
+          ang=angC+off,
+          far=Math.exp(-((r/380)**2))+.3*Math.exp(-((r/850)**2)),   // tighter e-folding (was 650/1350) so intensity actually fades out within the smaller RMAX above, instead of staying strong out to the old edge
+          az=.35+1*Math.max(0,Math.cos(ang-biasAng)),
+          w=far*az*taper;
+        if(w<.05)continue;
+        const clon=s.lon+r*Math.cos(ang)/(111*cl),clat=s.lat+r*Math.sin(ang)/111,
+          jr=Math.random()*4,ja=Math.random()*2*Math.PI;   // small organic jitter only - width and curl are now shaped explicitly, not left to randomness
+        rAdd(clon+jr*Math.cos(ja)/(111*cl),clat+jr*Math.sin(ja)/111,peak*w*(.75+.5*Math.random()))}}}}}
+// Ride: each parcel is advected one hour mostly by the surface wind, with a smaller 850 hPa contribution for a
+// touch of steering depth (both already carry the storm's spiral inflow/tangential/outflow, so parcels naturally
+// curve inward near the core and stream outward along the bands, exactly tracking the evolving flow). It dries
+// out faster over low-humidity air, and is removed once it ages out, fades below a visible threshold, drifts off
+// the grid, or - closing the cycle - spirals back within a small radius of ANY storm's centre.
+// A single one-hour Euler step is far too coarse near the eyewall: at r~rm an intense storm's tangential wind
+// (~s.v) gives an orbital period of only 1.5-2 h, so one hourly jump covers upwards of half an orbit and flings
+// the parcel outward along the tangent instead of letting it curve - eyewall rain self-ejects into the far field
+// after a step or two instead of building up a ring. Sub-stepping (resampling the wind at each intermediate
+// position) keeps each leg's turning angle small so tight inner-core orbits stay closed loops; outer parcels in
+// weaker, slower-turning flow are unaffected since their per-substep displacement is proportionally tiny anyway.
+const ADV_SUB=6,ADV_DT=3.6/ADV_SUB;
+function advectRain(){const{u,v,lv,q}=F,u8=lv[2],v8=lv[3];let i=0;
+  while(i<rPN){let lon=rLon[i],lat=rLat[i];
+    for(let sub=0;sub<ADV_SUB;sub++){const cl=Math.cos(lat*R),
+        uu=.9*sampG(u,lon,lat)+.1*sampG(u8,lon,lat),vv=.9*sampG(v,lon,lat)+.1*sampG(v8,lon,lat);
+      lon+=uu*ADV_DT/(111*cl);lat+=vv*ADV_DT/111}
+    const nl=lon,na=lat;
+    rLon[i]=nl;rLat[i]=na;rAge[i]++;
+    rAmt[i]*=.94-.06*clamp(1-sampG(q,nl,na),0,1);      // dry air along the way -> the parcel evaporates faster
+    let dead=rAge[i]>30||rAmt[i]<.6||nl<C.lon0||nl>C.lon1||na<C.lat0||na>C.lat1;
+    // Skip the reabsorption check on a parcel's first tick: without this, a parcel born right at the center
+    // (from spawnRain's new centerFloor term) got reabsorbed here before ever reaching the deposit loop below,
+    // so the middle never actually got painted no matter how much rain was spawned there.
+    if(!dead&&rAge[i]>1)for(const s of S.storms){if(Math.hypot((nl-s.lon)*111*Math.cos(s.lat*R),(na-s.lat)*111)<Math.min(18,.14*s.rm)){dead=true;break}}
+    if(dead){rPN--;rLon[i]=rLon[rPN];rLat[i]=rLat[rPN];rAmt[i]=rAmt[rPN];rAge[i]=rAge[rPN]}else i++}}
+// Fill-in: a parcel swarm, however dense, still leaves gaps between individual footprints at any single instant.
+// A cheap local blur (two box-blur passes, restricted to each storm's own footprint so the open-ocean background
+// keeps its texture) closes those gaps into a continuous shield/band look without hiding the underlying motion -
+// next frame's parcel positions still drive where the smoothed field ends up.
+function smoothPr(pr){for(const s of S.storms){const cl=Math.cos(s.lat*R),RCH=8.5,dl=RCH/cl,   // reach just needs to cover where spawnRain seeds (now out to ~850 km, was 1350); NOT relied on any more to control band width - that's shaped explicitly in spawnRain
+    i0=Math.max(1,Math.floor((s.lon-dl-C.lon0)/D)),i1=Math.min(GW-2,Math.ceil((s.lon+dl-C.lon0)/D)),
+    j0=Math.max(1,Math.floor((C.lat1-s.lat-RCH)/D)),j1=Math.min(GH-2,Math.ceil((C.lat1-s.lat+RCH)/D));
+  for(let pass=0;pass<1;pass++){   // one pass is enough now that the raw deposits are already the right size/shape - a second pass was extra spreading the band didn't need
+    for(let j=j0;j<=j1;j++)for(let i=i0;i<=i1;i++){const k=j*GW+i;PRT[k]=(pr[k]*2+pr[k-1]+pr[k+1])*.25}
+    for(let j=j0;j<=j1;j++)for(let i=i0;i<=i1;i++){const k=j*GW+i;pr[k]=(PRT[k]*2+PRT[k-GW]+PRT[k+GW])*.25}}}}
+// Carve the dry eye back out AFTER the parcel deposits and box-blur. Deposits + smoothPr already leave the eye
+// mostly rain-free at birth (spawnRain suppresses it via eyeHole), but for small, intense storms the eye radius
+// (~0.3*rm) can be well under one grid cell (0.25 deg, ~27 km) or under the blur radius, so the surrounding
+// eyewall's max-intensity ring gets smeared straight across the middle - the center reads as the MOST intense
+// spot instead of the driest one. This runs last, after smoothPr, so nothing re-fills what it clears, and the
+// radius has a floor so the hole stays visually resolvable even at coarse grid spacing.
+function carveEyes(pr){for(const s of S.storms){if(s.decay)continue;
+  const eyeStrength=clamp((s.v-18)/22,0,1);if(eyeStrength<=0)continue;
+  const cl=Math.cos(s.lat*R),rad=Math.max(D*111*.55,.24*s.rm),   // km; floored to just over half a grid cell
+    dlon=(rad/111)/cl,dlat=rad/111,
+    i0=Math.max(0,Math.floor((s.lon-dlon-C.lon0)/D)),i1=Math.min(GW-1,Math.ceil((s.lon+dlon-C.lon0)/D)),
+    j0=Math.max(0,Math.floor((C.lat1-s.lat-dlat)/D)),j1=Math.min(GH-1,Math.ceil((C.lat1-s.lat+dlat)/D));
+  for(let j=j0;j<=j1;j++){const lat=C.lat1-(j+.5)*D;
+    for(let i=i0;i<=i1;i++){const lon=C.lon0+(i+.5)*D,km=Math.hypot((lon-s.lon)*111*cl,(lat-s.lat)*111);
+      if(km>rad)continue;const t=km/rad,supp=1-eyeStrength*.92*(1-t*t);pr[j*GW+i]*=Math.max(.06,supp)}}}}
+// Deterministic center rain: painted directly onto the grid (not through the random parcel swarm, which has no
+// reliable way to keep a dense, stable feature confined to a handful of cells - spawn variance and the
+// reabsorption/advection cycle either starved the center or let it blow up unpredictably). Iterates the same
+// small per-storm bounding box carveEyes uses, so cost stays proportional to storm count, not grid size. Each
+// cell's amount is modulated by the ACTUAL local wind vector (already fully updated by fields() for this step) -
+// both its magnitude (calmer center -> lighter rain, consistent with the storm's own dynamics rather than an
+// arbitrary radial number) and its direction (feeds a low-order angular wobble so neighboring cells vary with
+// the real flow instead of every cell in the disc getting an identical, flat value) - so the patch reads as
+// textured convection tied to the storm's own wind field, not a uniform painted circle.
+function centerRain(pr){const{u,v}=F;
+  for(const s of S.storms){if(s.decay)continue;
+    const eyeStrength=clamp((s.v-18)/22,0,1),
+      rad=16+10*eyeStrength,                    // km - grows 16->26 with intensity (bigger core for stronger storms), still kept well inside rw so it never reaches the eyewall ring
+      cl=Math.cos(s.lat*R),dlon=(rad/111)/cl,dlat=rad/111,
+      i0=Math.max(0,Math.floor((s.lon-dlon-C.lon0)/D)),i1=Math.min(GW-1,Math.ceil((s.lon+dlon-C.lon0)/D)),
+      j0=Math.max(0,Math.floor((C.lat1-s.lat-dlat)/D)),j1=Math.min(GH-1,Math.ceil((C.lat1-s.lat+dlat)/D));
+    for(let j=j0;j<=j1;j++){const lat=C.lat1-(j+.5)*D;
+      for(let i=i0;i<=i1;i++){const k=j*GW+i,lon=C.lon0+(i+.5)*D,
+          dx=(lon-s.lon)*111*cl,dy=(lat-s.lat)*111,km=Math.hypot(dx,dy);
+        if(km>rad)continue;
+        const t=km/rad,base=Math.exp(-((t*2.1)**2)),               // tight Gaussian, ~zero by the time it reaches rad
+          spd=Math.hypot(u[k],v[k]),mag=.5+.5*Math.min(1,spd/25),  // scales with this cell's own wind speed
+          ang=Math.atan2(v[k],u[k]),wobble=.75+.25*Math.cos(3*ang+2*Math.atan2(dy,dx)); // cell-to-cell texture from local flow direction
+        pr[k]+=42*base*mag*wobble}}}}
+function precip(){const{pr}=F;
+  // Precipitation is now purely the storm's own convection: no terrain/orographic term at all, even inside a
+  // storm's own footprint. Gating it to nearby-storm-only (previous version) still let the ambient wind hitting
+  // terrain show up as rain whenever a storm happened to be nearby, which still read as unwanted "environment"
+  // rain. Now the ENTIRE precip field comes from the Lagrangian rain swarm (spawnRain/advectRain/smoothPr) and
+  // the explicit center patch (centerRain) below - both are storm-only constructs with no terrain input.
+  pr.fill(0);
+  spawnRain();advectRain();
+  for(let i=0;i<rPN;i++){const fx=(rLon[i]-C.lon0)/D-.5,fy=(C.lat1-rLat[i])/D-.5,ci=Math.round(fx),cj=Math.round(fy);
+    for(let dj=-RP_R;dj<=RP_R;dj++){const j=cj+dj;if(j<0||j>=GH)continue;
+      for(let di=-RP_R;di<=RP_R;di++){const ii=ci+di;if(ii<0||ii>=GW)continue;
+        pr[j*GW+ii]+=rAmt[i]*Math.exp(-(di*di+dj*dj)/RP_S)}}}
+  smoothPr(pr);centerRain(pr)/*,carveEyes(pr) - disabled for now, punched a hole bigger than the storm's real eye; revisit later*/}
 S.step=function(){S.t++;if(S.hm&&!S.hOff&&!hindOn()){S.hOff=true;S.nextSpawn=S.t+gap(true)}env();if(hindOn()){loadAna();if(S.wx==='replay')ZP.set(ZA);else dyn();hindSpawn()}else dyn();composeCG();if(S.t%24==0)setSST(S.E.sn);
   if(S.t>=S.nextSpawn){if(S.storms.length<6){const f=S.spawn();if(f&&Math.random()<.3)S.spawn(f)}   /* ~30% of genesis events get a companion 900-1500 km away */ S.nextSpawn=S.t+gap()}
   for(let k=0;k<N;k++)F.sa[k]*=.998;   // cold-wake recovery, ~21 d e-folding (real re-stratification is roughly 1-3 weeks)
-  for(const s of S.storms.slice())upd(s);while(merge());fields();humidity()};
+  for(const s of S.storms.slice())upd(s);while(merge());fields();humidity();precip()};
 })();
